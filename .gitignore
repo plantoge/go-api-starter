@@ -1,0 +1,23 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build output
+/bin/
+/tmp/
+*.exe
+*.test
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Test coverage
+coverage.out
+coverage.html
+
+# OS
+.DS_Store
+Thumbs.db
