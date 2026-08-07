@@ -369,7 +369,7 @@ Dua entitas berbeda yang kebetulan sama-sama bernama "user":
 
 | | `platform.users` | `<schema>.users` |
 |---|---|---|
-| Siapa | Admin sistem | Staf toko: owner, kasir, gudang |
+| Siapa | Admin sistem | Staf tenant (role dibuat sesuai kebutuhan project turunan) |
 | Wewenang | Kelola tenant, provisioning, monitoring | Data di tenant-nya sendiri |
 | Login | `/admin/auth/login` | `/auth/login` (+ `tenant_code`) |
 | Scope JWT | `platform` | `tenant` |
@@ -395,15 +395,24 @@ users                             -- admin sistem
 
 refresh_tokens                    -- untuk admin platform
   id, user_id, token_hash, expires_at, revoked_at, user_agent, ip
-  + kolom audit standar
+  created_at
 
 login_attempts                    -- rate limit login (platform & tenant)
   id, scope, tenant_id NULL, email, attempted_at, success
+  created_at
 ```
 
 `code` dan `schema_name` dipisah meski awalnya bernilai sama: `code` adalah
 identitas yang dipakai client saat login dan boleh berubah, sedangkan `schema_name`
 terikat ke struktur database dan tidak boleh berubah selamanya.
+
+### Pengecualian lain: tabel log & token
+
+`refresh_tokens` dan `login_attempts` (di kedua schema) hanya memakai `created_at`,
+di luar enam kolom audit standar. Keduanya adalah tabel *append-only*: baris tidak
+pernah diedit atau dihapus lewat aksi user, jadi `updated_at`/`updated_by`/
+`deleted_at`/`deleted_by` tidak punya makna. Status token dicabut sudah diwakili
+`revoked_at`, bukan `deleted_at`.
 
 ## RBAC
 
@@ -516,8 +525,11 @@ konsisten — "bukan orang di dalam tenant ini".
 Sukses:
 
 ```json
-{ "success": true, "data": {}, "meta": { "page": 1, "total": 100 } }
+{ "success": true, "data": {} }
 ```
+
+Untuk daftar berpaginasi, bentuk `meta` mengikuti format yang ditetapkan di bagian
+Pagination (`page`, `limit`, `total`, `total_pages`) — bukan bentuk bebas per modul.
 
 Gagal:
 
