@@ -187,7 +187,7 @@ mengubah logic.
 2. INSERT platform.tenants (status: provisioning)
 3. CREATE SCHEMA
 4. Jalankan seluruh migrasi tenant ke schema tersebut
-5. Seed permissions + role default (owner, cashier)
+5. Seed permissions + role default (`owner` saja)
 6. Buat user owner pertama
 7. UPDATE status → active
 ```
@@ -245,7 +245,8 @@ cli tenant activate --code=toko_aba
 cli tenant delete --code=toko_aba        # soft delete
 cli tenant purge --code=toko_aba --confirm
 
-cli token cleanup                        # hapus refresh token kedaluwarsa
+cli permission sync --all                # sinkron konstanta permission ke tenant
+cli cleanup                              # hapus refresh token & login_attempts kedaluwarsa
 ```
 
 `--all` berjalan berurutan dan **berhenti di kegagalan pertama**, melaporkan tenant
@@ -326,8 +327,14 @@ perlindungan dari percobaan tebak password.
 
 Aturannya: **5 percobaan gagal per email dalam 15 menit** → percobaan berikutnya
 ditolak sampai jendela waktunya lewat, bahkan bila password yang dimasukkan benar.
-Percobaan dicatat di tabel (bukan memori) agar tetap berlaku setelah aplikasi
-restart.
+
+Percobaan dicatat di tabel `platform.login_attempts`, bukan di memori. Alasannya dua:
+hitungan tetap berlaku setelah aplikasi restart, dan tabel ini sekaligus menjadi
+riwayat login — berguna saat ada user melaporkan akunnya dipakai orang lain, karena
+waktu dan IP percobaan bisa ditelusuri.
+
+Bebannya kecil (satu baris per percobaan, dibaca lewat index untuk 15 menit
+terakhir), dan barisnya dibersihkan berkala lewat `cli cleanup`.
 
 Ini tidak berpengaruh sama sekali pada sesi yang sudah berjalan.
 
@@ -385,10 +392,37 @@ role_permissions   (role_id, permission_id)
 user_roles         (user_id, role_id)
 ```
 
-Permission didefinisikan sebagai konstanta Go (`const ProductCreate = "product.create"`)
-dan disinkronkan ke tabel `permissions` saat provisioning maupun migrasi. **Sumber
-kebenarannya kode, bukan database** — menambah permission cukup dengan menambah
-konstanta, tanpa migrasi manual di puluhan tenant.
+Permission didefinisikan sebagai konstanta Go
+(`const ProductCreate = "product.create"`). **Sumber kebenarannya kode, bukan
+database.**
+
+### Sinkronisasi permission
+
+Konstanta Go tidak dikenal oleh file migrasi `.sql`, jadi permission baru tidak bisa
+ikut menyebar lewat migrasi biasa. Tanpa mekanisme khusus, menambah
+`const SaleVoid = "sale.void"` hari ini tidak akan pernah sampai ke tenant yang sudah
+ada — dan role di tenant lama tidak akan pernah bisa diberi permission itu.
+
+Mekanismenya adalah perintah tersendiri:
+
+```
+cli permission sync --all
+cli permission sync --tenant=toko_aba
+```
+
+Perintah ini membaca seluruh konstanta permission di kode, lalu `INSERT` yang belum
+ada di tabel `permissions` tiap tenant. Sifatnya *idempotent* — aman dijalankan
+berulang kali.
+
+Permission yang konstantanya dihapus dari kode **tidak** ikut dihapus dari database
+(baris di `role_permissions` bisa masih menunjuk ke sana). Pembersihannya manual dan
+disengaja.
+
+Perintah ini masuk ke urutan deploy, tepat setelah migrasi tenant.
+
+Role default saat provisioning hanya `owner`. Tidak ada role bawaan lain — nama
+seperti `cashier` bersifat POS, sedangkan starter ini harus netral terhadap domain.
+Tiap project turunan membuat role sendiri sesuai kebutuhannya.
 
 Tabel penghubung (`role_permissions`, `user_roles`) **dikecualikan dari soft
 delete** — lihat Konvensi Tabel di bawah.
@@ -482,6 +516,57 @@ yang sama.
 Logging `log/slog` format JSON, dengan `request_id` dan `tenant_id` otomatis melekat
 di setiap baris log dalam satu request.
 
+## Versi API & Pagination
+
+### Versi API
+
+Semua rute berada di bawah `/api/v1` sejak awal. Biayanya nol sekarang, dan mahal
+bila baru dipasang belakangan — seluruh URL di frontend yang sudah berjalan harus
+diubah.
+
+Naik ke `v2` **hanya** bila ada perubahan yang merusak client lama:
+
+| Perubahan | Merusak | Naik versi |
+|---|---|---|
+| Menambah field di response | Tidak | Tidak |
+| Menambah endpoint | Tidak | Tidak |
+| Menambah parameter opsional | Tidak | Tidak |
+| Menghapus / mengganti nama field | **Ya** | Ya |
+| Mengubah arti field | **Ya** | Ya |
+| Menjadikan parameter wajib | **Ya** | Ya |
+
+Selama frontend dan backend dikuasai satu pihak dan bisa dideploy bersamaan, `v1`
+boleh diubah langsung tanpa membuat `v2`. Versi baru baru benar-benar diperlukan bila
+ada client yang tidak bisa dipaksa memperbarui diri — misalnya aplikasi mobile yang
+sudah terpasang di perangkat. Bila itu terjadi, `v1` dan `v2` berjalan berdampingan
+dan `v1` diumumkan akan dihentikan dalam tenggat tertentu.
+
+### Pagination
+
+Memakai **offset**, bukan cursor:
+
+```
+GET /api/v1/users?page=2&limit=20&sort=created_at&order=desc
+```
+
+- `limit` default 20, maksimum 100 (nilai di atas itu dipangkas, bukan ditolak)
+- `page` dimulai dari 1
+
+Response memakai blok `meta` yang seragam:
+
+```json
+{
+  "success": true,
+  "data": [],
+  "meta": { "page": 2, "limit": 20, "total": 137, "total_pages": 7 }
+}
+```
+
+Offset dipilih karena mudah dipahami dan cocok dengan UI bernomor halaman. Cursor
+lebih unggul pada dataset sangat besar, tapi tidak sepadan dengan kerumitannya di
+sini. Keseragaman formatnya yang penting — bila tiap modul memakai gaya sendiri,
+frontend harus menangani banyak bentuk berbeda.
+
 ## Testing
 
 | Lapis | Cara | Yang diuji |
@@ -501,6 +586,10 @@ dipakai bersama.
 
 Konsekuensinya: developer baru wajib memasang PostgreSQL lebih dulu sebelum bisa
 menjalankan test. Ini dicatat di `docs/getting-started.md`.
+
+Koneksi test dibaca dari berkas `.env.test` terpisah, agar tidak mungkin tertukar
+dengan database development. `.env.test.example` ikut masuk git sebagai contoh;
+`.env.test` sendiri diabaikan `.gitignore`.
 
 **Test terpenting di repo ini:** dua tenant dengan data serupa, memastikan query
 tenant A tidak pernah melihat baris milik tenant B — termasuk saat terjadi error dan
@@ -532,7 +621,11 @@ ACCESS_TOKEN_TTL=15m
 REFRESH_TOKEN_TTL=168h
 LOGIN_MAX_ATTEMPTS=5
 LOGIN_ATTEMPT_WINDOW=15m
+SHUTDOWN_TIMEOUT=15s
 ```
+
+Hampir seluruh penyetelan sistem berada di sini, sehingga bisa diubah di server
+tanpa build ulang — cukup edit berkas lalu restart.
 
 Alasan dipecah: lebih mudah dibaca dan diubah, dan password yang mengandung `@`,
 `#`, atau `/` bisa ditulis apa adanya tanpa URL-encoding — sumber kesalahan yang
@@ -605,6 +698,7 @@ go build -o api ./cmd/api
 go build -o cli ./cmd/cli
 ./cli migrate platform up
 ./cli migrate tenant up --all
+./cli permission sync --all
 sudo systemctl restart app-api
 ```
 
@@ -638,8 +732,11 @@ penyebabnya tidak terlihat.
 ## Operasional
 
 - `/health` (liveness) dan `/health/ready` (cek koneksi DB).
-- Graceful shutdown — menyelesaikan request yang sedang berjalan sebelum mati, agar
-  transaksi kasir tidak terputus.
+- Graceful shutdown — berhenti menerima request baru, lalu menunggu request yang
+  sedang berjalan sampai selesai agar transaksi kasir tidak terputus. Dibatasi
+  `SHUTDOWN_TIMEOUT` (default 15 detik); lewat dari itu proses ditutup paksa. Tanpa
+  batas ini, satu query yang menggantung membuat aplikasi tidak pernah mati dan
+  akhirnya dibunuh paksa systemd — persis hal yang ingin dihindari.
 - Makefile untuk perintah sehari-hari (`make run`, `make test`, `make build`).
 
 ## Dokumentasi
