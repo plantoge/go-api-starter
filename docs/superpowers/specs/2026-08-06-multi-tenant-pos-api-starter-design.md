@@ -1,6 +1,6 @@
 # Multi-Tenant API Starter (Schema-per-Tenant) — Design
 
-**Tanggal:** 2026-08-06
+**Tanggal:** 2026-08-06 (revisi 2026-08-07)
 **Status:** Disetujui
 
 ## Ringkasan
@@ -20,8 +20,21 @@ yang dibangun di repo terpisah hasil clone.
 | Akses data | sqlx (driver pgx) |
 | Migrasi | golang-migrate |
 | Auth | JWT (access + refresh token) |
+| Hash password | bcrypt, cost 12 |
 | Logging | `log/slog` (stdlib), format JSON |
-| Testing | testcontainers untuk integration test |
+| Dokumentasi API | `swaggo/swag` (OpenAPI di-generate dari komentar handler) |
+| Hot reload (dev) | `air` |
+| Testing | PostgreSQL lokal (bukan Docker) |
+| Deploy | Binary + systemd + Caddy, **tanpa Docker** |
+
+**Docker tidak dipakai sama sekali** — tidak untuk development, testing, maupun
+produksi. Go menghasilkan binary statis, sehingga masalah yang biasanya diselesaikan
+Docker (kecocokan runtime, dependency) tidak berlaku di sini.
+
+Pilihan bcrypt di atas Argon2id: Argon2id secara teori lebih tahan serangan GPU, tapi
+punya tiga parameter yang salah setel justru melemahkan atau menghabiskan RAM saat
+banyak login bersamaan. bcrypt hanya punya satu parameter, dan cost 12 (~250ms per
+verifikasi) sudah lebih dari cukup untuk kasus ini.
 
 ### Catatan soal Fiber
 
@@ -183,6 +196,33 @@ Langkah 2–7 berada dalam **satu transaksi**. PostgreSQL mendukung DDL transaks
 jadi kegagalan di langkah mana pun membatalkan seluruhnya — tidak ada tenant
 setengah jadi.
 
+## Siklus Hidup Tenant
+
+Empat kondisi, masing-masing punya arti berbeda:
+
+| Kondisi | Arti | Login | Data |
+|---|---|---|---|
+| `provisioning` | Sedang dibuat | Ditolak | Belum lengkap |
+| `active` | Normal | Diizinkan | Utuh |
+| `suspended` | Dibekukan sementara (mis. nunggak) | Ditolak | Utuh, bisa diaktifkan lagi |
+| soft deleted (`deleted_at` terisi) | Berhenti berlangganan | Ditolak | **Schema masih ada di disk** |
+
+Poin penting: soft delete hanya menyembunyikan baris di `platform.tenants`. Schema
+tenant beserta seluruh isinya tetap ada dan tetap memakan ruang disk.
+
+Penghapusan permanen dilakukan lewat perintah terpisah yang eksplisit:
+
+```
+cli tenant purge --code=toko_aba --confirm
+```
+
+Perintah ini menjalankan `DROP SCHEMA` dan **hanya berjalan bila tenant sudah
+soft-deleted lebih dari 30 hari**. Jeda itu adalah jaring pengaman: `DROP SCHEMA`
+tidak bisa dibatalkan, dan satu salah ketik nama tenant berarti data satu client
+hilang permanen.
+
+Alur lengkapnya: `active` → `suspended` → soft delete → (≥30 hari) → purge manual.
+
 ## Migrasi
 
 | | Lokasi | Tabel versi | Kapan |
@@ -196,13 +236,31 @@ Perintah CLI:
 cli migrate platform up
 cli migrate tenant up --all
 cli migrate tenant up --tenant=toko_aba
+cli migrate status                       # versi tiap tenant, tandai yang tertinggal
+
 cli tenant create --code=toko_aba --name="Toko ABA" --owner-email=...
 cli tenant list
-cli token cleanup            # hapus refresh token kedaluwarsa
+cli tenant suspend --code=toko_aba
+cli tenant activate --code=toko_aba
+cli tenant delete --code=toko_aba        # soft delete
+cli tenant purge --code=toko_aba --confirm
+
+cli token cleanup                        # hapus refresh token kedaluwarsa
 ```
 
 `--all` berjalan berurutan dan **berhenti di kegagalan pertama**, melaporkan tenant
 mana yang sudah dan belum diproses.
+
+### Pengaman versi schema
+
+Karena `--all` bisa berhenti di tengah, sebagian tenant dapat tertinggal versi
+sementara kode aplikasi sudah mengasumsikan versi terbaru. Tanpa pengaman, gejalanya
+muncul sebagai error SQL yang menyesatkan seperti `column does not exist`.
+
+Pengamannya: versi schema tiap tenant dibaca dan di-cache saat tenant pertama kali
+diakses. Bila versinya lebih rendah dari versi yang dibutuhkan kode (konstanta di
+Go), request ditolak dengan error eksplisit `TENANT_MIGRATION_PENDING` — bukan
+dibiarkan menabrak.
 
 ## Autentikasi
 
@@ -236,16 +294,42 @@ sampai token kedaluwarsa kalau ditanam di dalamnya. Sebagai gantinya, permission
 dibaca dari database saat request, dengan cache in-memory TTL 1 menit yang
 diinvalidasi saat role user berubah.
 
+**Asumsi single instance.** Cache permission disimpan di memori proses. Bila
+aplikasi kelak dijalankan lebih dari satu instance di belakang load balancer,
+pencabutan permission di instance A tidak terlihat oleh instance B sampai TTL habis
+— sehingga user yang aksesnya sudah dicabut masih bisa lolos hingga 1 menit. Selama
+aplikasi berjalan satu instance, ini tidak pernah terjadi. Asumsi ini ditulis
+eksplisit agar saat scaling nanti langsung terlihat bahwa cache harus dipindah ke
+Redis lebih dulu.
+
 ### Refresh token
 
-Disimpan **ter-hash** (SHA-256) di `<schema>.refresh_tokens` bersama `user_id`,
-`expires_at`, `revoked_at`, `user_agent`, `ip`. Yang dikirim ke client adalah nilai
-acak 32 byte, bukan JWT.
+Disimpan **ter-hash** (SHA-256) bersama `user_id`, `expires_at`, `revoked_at`,
+`user_agent`, `ip`. Yang dikirim ke client adalah nilai acak 32 byte, bukan JWT.
+
+Ada **dua tabel terpisah**, satu untuk tiap jenis user:
+
+- `platform.refresh_tokens` — untuk admin platform
+- `<schema>.refresh_tokens` — untuk staf tenant
+
+Ketentuan:
 
 - Access token: 15 menit
 - Refresh token: 7 hari
 - Logout menandai `revoked_at`
 - Tanpa rotation (bisa ditambahkan nanti tanpa mengubah struktur)
+
+### Rate limit login
+
+Berlaku khusus untuk kedua endpoint login — bukan pembatasan trafik umum, melainkan
+perlindungan dari percobaan tebak password.
+
+Aturannya: **5 percobaan gagal per email dalam 15 menit** → percobaan berikutnya
+ditolak sampai jendela waktunya lewat, bahkan bila password yang dimasukkan benar.
+Percobaan dicatat di tabel (bukan memori) agar tetap berlaku setelah aplikasi
+restart.
+
+Ini tidak berpengaruh sama sekali pada sesi yang sudah berjalan.
 
 ## Model User
 
@@ -260,6 +344,34 @@ Dua entitas berbeda yang kebetulan sama-sama bernama "user":
 
 Keduanya sekaligus berfungsi sebagai contoh pola di starterpack: satu non-tenant,
 satu tenant-scoped.
+
+## Tabel Schema Platform
+
+```sql
+tenants
+  id             UUID PK
+  code           TEXT UNIQUE      -- "toko_aba", dipakai saat login
+  name           TEXT             -- "Toko ABA"
+  schema_name    TEXT UNIQUE      -- "toko_aba"
+  status         TEXT             -- provisioning | active | suspended
+  suspended_at   TIMESTAMPTZ NULL
+  + kolom audit standar
+
+users                             -- admin sistem
+  id, email (unik), password_hash, name, is_active
+  + kolom audit standar
+
+refresh_tokens                    -- untuk admin platform
+  id, user_id, token_hash, expires_at, revoked_at, user_agent, ip
+  + kolom audit standar
+
+login_attempts                    -- rate limit login (platform & tenant)
+  id, scope, tenant_id NULL, email, attempted_at, success
+```
+
+`code` dan `schema_name` dipisah meski awalnya bernilai sama: `code` adalah
+identitas yang dipakai client saat login dan boleh berubah, sedangkan `schema_name`
+terikat ke struktur database dan tidak boleh berubah selamanya.
 
 ## RBAC
 
@@ -277,6 +389,9 @@ Permission didefinisikan sebagai konstanta Go (`const ProductCreate = "product.c
 dan disinkronkan ke tabel `permissions` saat provisioning maupun migrasi. **Sumber
 kebenarannya kode, bukan database** — menambah permission cukup dengan menambah
 konstanta, tanpa migrasi manual di puluhan tenant.
+
+Tabel penghubung (`role_permissions`, `user_roles`) **dikecualikan dari soft
+delete** — lihat Konvensi Tabel di bawah.
 
 Role `owner` bertanda `is_system = true`: tidak bisa dihapus dan selalu memiliki
 seluruh permission. Ini diterapkan lewat *bypass* di pengecekan, bukan lewat baris di
@@ -315,6 +430,28 @@ Konsekuensi yang wajib ditangani:
   migrasi).
 - Kolom `*_by` diisi dari user di `context.Context`.
 
+### Pengecualian: tabel penghubung
+
+`role_permissions` dan `user_roles` hanya memakai `created_at` + `created_by`.
+Pencabutan dilakukan dengan `DELETE` biasa, bukan soft delete.
+
+Alasannya: soft delete pada relasi membuat setiap pengecekan permission menumpuk
+filter `deleted_at IS NULL` berlapis tanpa manfaat nyata — riwayat pemberian dan
+pencabutan akses lebih tepat dicatat di log daripada di tabel relasi.
+
+### Aturan kolom `*_by` lintas schema
+
+Kolom `*_by` di tabel tenant **selalu merujuk user di schema tenant yang sama**.
+
+Masalahnya muncul saat provisioning: user owner pertama dibuat oleh admin platform,
+yang datanya ada di `platform.users` — schema berbeda. UUID lintas schema tidak bisa
+dijamin lewat foreign key, dan saat dibaca akan tampak seperti data rusak (UUID yang
+tidak ditemukan di tabel manapun dalam schema itu).
+
+Aturannya: bila pelakunya admin platform atau proses sistem, kolom `*_by` diisi
+`NULL`, dan identitas pelaku dicatat di log. Dengan begitu `NULL` punya arti yang
+konsisten — "bukan orang di dalam tenant ini".
+
 ## Response & Error
 
 Sukses:
@@ -350,23 +487,186 @@ di setiap baris log dalam satu request.
 | Lapis | Cara | Yang diuji |
 |---|---|---|
 | Unit | Mock repository | Business logic di service |
-| Integration | testcontainers (PostgreSQL asli) | Repository, migrasi, provisioning |
+| Integration | PostgreSQL lokal, database `app_test` | Repository, migrasi, provisioning |
 | E2E | Fiber test app + DB asli | Login → akses → RBAC |
 
 Integration test wajib memakai database asli. Yang paling ingin dibuktikan adalah
 perilaku `search_path` dan isolasi schema, dan itu tidak mungkin diuji dengan mock.
 
+Karena Docker tidak dipakai, testcontainers tidak berlaku. Sebagai gantinya test
+menembak PostgreSQL yang terinstall di mesin, ke database khusus `app_test`. Setiap
+test membuat schema tenant bernama acak lalu menghapusnya di akhir — isolasi tetap
+terjaga dan test tetap bisa berjalan paralel, hanya instance PostgreSQL-nya yang
+dipakai bersama.
+
+Konsekuensinya: developer baru wajib memasang PostgreSQL lebih dulu sebelum bisa
+menjalankan test. Ini dicatat di `docs/getting-started.md`.
+
 **Test terpenting di repo ini:** dua tenant dengan data serupa, memastikan query
 tenant A tidak pernah melihat baris milik tenant B — termasuk saat terjadi error dan
 rollback di tengah transaksi.
 
+## Konfigurasi
+
+Lewat env var, divalidasi saat boot — aplikasi menolak start bila ada yang kurang
+atau tidak valid, bukan gagal belakangan saat request pertama masuk.
+
+Koneksi database ditulis **terpecah**, bukan sebagai satu URL:
+
+```ini
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=app
+DB_PASSWORD=rahasia
+DB_NAME=appdb
+DB_SSLMODE=disable
+
+DB_MAX_OPEN_CONNS=25
+DB_MAX_IDLE_CONNS=5
+DB_CONN_MAX_LIFETIME=5m
+
+APP_PORT=8080
+APP_ENV=production
+JWT_SECRET=...
+ACCESS_TOKEN_TTL=15m
+REFRESH_TOKEN_TTL=168h
+LOGIN_MAX_ATTEMPTS=5
+LOGIN_ATTEMPT_WINDOW=15m
+```
+
+Alasan dipecah: lebih mudah dibaca dan diubah, dan password yang mengandung `@`,
+`#`, atau `/` bisa ditulis apa adanya tanpa URL-encoding — sumber kesalahan yang
+gejalanya hanya muncul sebagai `authentication failed`. Di dalam kode keenam nilai
+DB digabung jadi satu connection string.
+
+Pindah ke server PostgreSQL terpisah nanti cukup mengubah `DB_HOST` dan
+`DB_SSLMODE`, tanpa perubahan kode.
+
+## Deployment
+
+Tanpa Docker. Go menghasilkan satu binary statis, jadi server tidak perlu runtime
+apa pun.
+
+### Susunan di server
+
+```
+/opt/app/
+  api                        # binary HTTP server
+  cli                        # binary CLI (migrasi, provisioning)
+  api.backup                 # binary versi sebelumnya, untuk rollback
+  migrations/                # file .sql
+
+/etc/app/api.env             # config, permission 600
+/etc/systemd/system/app-api.service
+```
+
+Binary CLI dipisah dari API agar migrasi dan provisioning bisa dijalankan tanpa
+menyentuh proses yang sedang melayani request.
+
+### systemd
+
+Aplikasi dijalankan sebagai service dengan `Restart=always`, `User=app` (bukan
+root), dan log ke journald. Yang didapat: restart otomatis saat crash, start
+otomatis saat server boot, dan `journalctl -u app-api -f` untuk membaca log.
+
+### Caddy sebagai reverse proxy
+
+Aplikasi hanya mendengarkan di `127.0.0.1:8080`, tidak pernah langsung terbuka ke
+internet. Caddy berdiri di depan untuk TLS dan pembagian rute:
+
+```
+tokoku.com {
+    handle /api/* {
+        reverse_proxy localhost:8080
+    }
+    handle {
+        root * /var/www/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}
+```
+
+Caddy dipilih di atas nginx karena mengurus sertifikat Let's Encrypt sepenuhnya
+otomatis, termasuk perpanjangan. Reverse proxy tetap diperlukan meski server HTTP
+Go sudah siap produksi, karena: frontend React dan backend harus berbagi port 443,
+port di bawah 1024 butuh hak root (aplikasi sebaiknya berjalan sebagai user biasa),
+dan file statis lebih efisien dilayani Caddy.
+
+### Alur deploy
+
+Kode di-*clone* di server; build dilakukan di server:
+
+```bash
+cd /opt/app
+git pull
+cp api api.backup                 # simpan versi lama untuk rollback
+go build -o api ./cmd/api
+go build -o cli ./cmd/cli
+./cli migrate platform up
+./cli migrate tenant up --all
+sudo systemctl restart app-api
+```
+
+Dibungkus jadi `deploy.sh`. Rollback bila versi baru bermasalah:
+
+```bash
+cp api.backup api && sudo systemctl restart app-api
+```
+
+Migrasi sengaja dijalankan sebagai langkah terpisah, **bukan otomatis saat aplikasi
+start** — agar tidak ada dua instance yang berebut menjalankan migrasi yang sama.
+
+Restart menyebabkan downtime 1–2 detik. Untuk POS, deploy dilakukan di luar jam
+operasional. Zero-downtime deploy tidak dibangun sekarang.
+
+Build ulang hanya diperlukan bila kode `.go` berubah. Mengubah `api.env` atau
+menambah tenant cukup restart / jalankan CLI.
+
+Target OS: Linux (Ubuntu/Debian maupun Rocky). Dokumentasi mencakup keduanya,
+termasuk catatan SELinux di Rocky yang secara default memblokir Caddy menghubungi
+port lokal.
+
+### Development di Windows
+
+Development dilakukan di Windows 11 dengan PostgreSQL terpasang lokal dan `air`
+untuk hot reload. Karena target deploy adalah Linux, repo menyertakan
+`.gitattributes` yang memaksa akhiran baris LF untuk `*.sh` dan `*.sql` — tanpa itu
+script yang ditulis di Windows gagal di Linux dengan error `bad interpreter` yang
+penyebabnya tidak terlihat.
+
 ## Operasional
 
-- Konfigurasi lewat env var, divalidasi saat boot (gagal cepat bila ada yang kurang).
 - `/health` (liveness) dan `/health/ready` (cek koneksi DB).
-- Graceful shutdown.
-- Docker Compose untuk PostgreSQL saat development.
-- Makefile untuk perintah sehari-hari.
+- Graceful shutdown — menyelesaikan request yang sedang berjalan sebelum mati, agar
+  transaksi kasir tidak terputus.
+- Makefile untuk perintah sehari-hari (`make run`, `make test`, `make build`).
+
+## Dokumentasi
+
+Dua hal yang harus dipisahkan:
+
+- `docs/superpowers/specs/` — **arsip keputusan**, bertanggal, tidak diedit lagi saat
+  kode berkembang. Nilainya justru pada keawetannya.
+- `docs/` — **dokumentasi hidup**, wajib selalu cocok dengan kode.
+
+Berkas di `docs/` ditulis **berbarengan dengan implementasinya**, bukan di muka —
+dokumentasi untuk kode yang belum ada hampir pasti meleset lalu terlanjur dipercaya:
+
+| Berkas | Isi |
+|---|---|
+| `getting-started.md` | Setup Windows, install PostgreSQL, migrasi, tenant pertama |
+| `adding-a-module.md` | Langkah menambah modul baru + konvensi sub-grup domain |
+| `multi-tenancy.md` | Aturan keselamatan: `WithTenant`, batas `*fiber.Ctx`, contoh salah |
+| `database-conventions.md` | Kolom audit, soft delete, unique parsial, trigger, penamaan |
+| `deployment.md` | systemd, Caddy, `deploy.sh`, env var, Ubuntu & Rocky |
+
+`README.md` di root ditulis **setelah starter selesai**, bukan sekarang.
+
+`CLAUDE.md` di root berisi aturan yang bila dilanggar berakibat serius —
+`*fiber.Ctx` berhenti di handler, semua akses data tenant lewat `WithTenant`, modul
+tidak memanggil repository modul lain — agar terbaca otomatis di setiap sesi, di
+semua project turunan.
 
 ## Di Luar Cakupan
 
@@ -374,6 +674,9 @@ Hal-hal berikut sengaja tidak dibangun sekarang, dan struktur di atas tidak
 menghalangi penambahannya nanti:
 
 - Endpoint admin self-service untuk provisioning (logic-nya sudah reusable)
+- GitHub Actions / CI-CD — deploy manual dulu, ditambahkan saat sudah terasa perlu
+- Zero-downtime deploy
+- Cache permission terdistribusi (Redis) — lihat asumsi single instance
 - Refresh token rotation
 - Domain bisnis POS (product, sale, inventory) — dibangun di repo terpisah
 - Rate limiting, observability/tracing
