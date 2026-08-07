@@ -230,6 +230,9 @@ Alur lengkapnya: `active` → `suspended` → soft delete → (≥30 hari) → p
 | Platform | `migration/platform/` | `platform.schema_migrations` | Sekali saat deploy |
 | Tenant | `migration/tenant/` | `<schema>.schema_migrations` | Saat provisioning + deploy ke semua tenant |
 
+Migrasi platform paling pertama bertugas menjalankan
+`CREATE SCHEMA IF NOT EXISTS platform`, sebelum tabel apa pun dibuat.
+
 Perintah CLI:
 
 ```
@@ -245,9 +248,20 @@ cli tenant activate --code=toko_aba
 cli tenant delete --code=toko_aba        # soft delete
 cli tenant purge --code=toko_aba --confirm
 
+cli admin create --email=... --name=...   # admin platform pertama (bootstrap)
 cli permission sync --all                # sinkron konstanta permission ke tenant
 cli cleanup                              # hapus refresh token & login_attempts kedaluwarsa
 ```
+
+### Bootstrap admin pertama
+
+Ada masalah ayam-dan-telur: membuat admin platform memerlukan login sebagai admin,
+padahal `platform.users` masih kosong sehingga tidak ada yang bisa login. Tanpa jalan
+keluar, sistem tidak bisa dipakai sama sekali setelah dipasang.
+
+`cli admin create` berjalan tanpa autentikasi — aksesnya dijaga oleh kepemilikan
+shell di server, bukan oleh token. Password dibuat acak dan dicetak sekali ke layar,
+lalu wajib diganti saat login pertama.
 
 `--all` berjalan berurutan dan **berhenti di kegagalan pertama**, melaporkan tenant
 mana yang sudah dan belum diproses.
@@ -319,6 +333,17 @@ Ketentuan:
 - Refresh token: 7 hari
 - Logout menandai `revoked_at`
 - Tanpa rotation (bisa ditambahkan nanti tanpa mengubah struktur)
+
+### Aturan password
+
+Minimal 8 karakter. Tidak ada syarat kombinasi huruf besar, angka, atau simbol.
+
+Aturan yang rumit terbukti mendorong orang membuat password yang justru mudah
+ditebak (`Password1!`) atau menuliskannya di kertas. Panjang lebih menentukan
+daripada variasi karakter.
+
+Password baru diperiksa juga terhadap daftar pendek password paling umum
+(`123456789`, `password`, dan sejenisnya) dan ditolak bila cocok.
 
 ### Rate limit login
 
@@ -504,6 +529,28 @@ Gagal:
 }
 ```
 
+Khusus `VALIDATION_ERROR`, `details` berisi peta nama field ke daftar pesan,
+sehingga frontend bisa menaruh pesan tepat di bawah field yang salah:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Data yang dikirim tidak valid",
+    "details": {
+      "email": ["format email tidak valid"],
+      "password": ["minimal 8 karakter"]
+    }
+  },
+  "request_id": "01HQ..."
+}
+```
+
+Nama field memakai penamaan yang sama persis dengan yang dikirim client (`snake_case`
+di JSON), bukan nama field di struct Go. Validasi memakai `go-playground/validator`,
+dan penerjemahan ke bentuk di atas dilakukan satu kali di `shared/validator`.
+
 Service mengembalikan `*apperror.Error` bertipe (`NotFound`, `Conflict`,
 `Validation`, `Forbidden`, `Internal`). Satu error handler Fiber di paling atas
 menerjemahkannya menjadi status HTTP dan body — handler tidak pernah menulis
@@ -551,6 +598,26 @@ GET /api/v1/users?page=2&limit=20&sort=created_at&order=desc
 
 - `limit` default 20, maksimum 100 (nilai di atas itu dipangkas, bukan ditolak)
 - `page` dimulai dari 1
+
+**`sort` wajib memakai daftar putih.** Nama kolom tidak bisa dikirim sebagai
+parameter query seperti nilai biasa — ia harus disisipkan langsung ke teks SQL. Bila
+nilainya diambil mentah dari URL, penyerang dapat menyisipkan potongan SQL dan
+membaca data di luar haknya, **termasuk menembus ke schema tenant lain**. Ini
+membatalkan seluruh isolasi tenant.
+
+Karena itu tiap repository mendeklarasikan kolom yang boleh disortir:
+
+```go
+var userSortable = map[string]string{
+    "created_at": "created_at",
+    "name":       "name",
+    "email":      "email",
+}
+```
+
+Nilai `sort` di luar daftar ditolak dengan `VALIDATION_ERROR`, bukan diabaikan
+diam-diam. `order` hanya menerima `asc` atau `desc`. Helper di `shared/pagination`
+memaksa pemeriksaan ini sehingga tidak bisa terlewat.
 
 Response memakai blok `meta` yang seragam:
 
@@ -622,6 +689,8 @@ REFRESH_TOKEN_TTL=168h
 LOGIN_MAX_ATTEMPTS=5
 LOGIN_ATTEMPT_WINDOW=15m
 SHUTDOWN_TIMEOUT=15s
+
+CORS_ALLOWED_ORIGINS=https://tokoku.com
 ```
 
 Hampir seluruh penyetelan sistem berada di sini, sehingga bisa diubah di server
@@ -634,6 +703,26 @@ DB digabung jadi satu connection string.
 
 Pindah ke server PostgreSQL terpisah nanti cukup mengubah `DB_HOST` dan
 `DB_SSLMODE`, tanpa perubahan kode.
+
+## CORS
+
+Saat development, React berjalan di `http://localhost:5173` sementara API di
+`http://localhost:8080`. Browser menganggapnya dua asal berbeda dan **memblokir
+seluruh request** bila CORS tidak disetel — hambatan yang muncul di menit pertama
+menyambungkan frontend.
+
+Daftar asal yang diizinkan dibaca dari `CORS_ALLOWED_ORIGINS` (dipisah koma):
+
+- Development: `http://localhost:5173`
+- Produksi: domain aplikasi, mis. `https://tokoku.com`
+
+Wildcard `*` **tidak** dipakai, karena API ini memakai kredensial (token). Header
+yang diizinkan dibatasi pada yang benar-benar dipakai: `Content-Type`,
+`Authorization`.
+
+Di produksi, frontend dan API berada di balik satu domain lewat Caddy, sehingga CORS
+sebenarnya tidak terpakai — tetap disetel sebagai pengaman bila kelak dipisah ke
+subdomain berbeda.
 
 ## Deployment
 
@@ -720,6 +809,22 @@ menambah tenant cukup restart / jalankan CLI.
 Target OS: Linux (Ubuntu/Debian maupun Rocky). Dokumentasi mencakup keduanya,
 termasuk catatan SELinux di Rocky yang secara default memblokir Caddy menghubungi
 port lokal.
+
+### Backup
+
+Satu database menampung data transaksi seluruh client. Satu disk rusak berarti semua
+toko kehilangan data sekaligus, jadi backup bukan hal opsional di sini.
+
+Ketentuan minimum:
+
+- `pg_dump` seluruh database, dijadwalkan harian lewat systemd timer
+- Hasil backup **disimpan di luar server aplikasi** — backup yang duduk di disk yang
+  sama tidak melindungi dari kerusakan disk
+- Simpan 7 harian + 4 mingguan
+- **Uji pemulihan secara berkala.** Backup yang tidak pernah dicoba dipulihkan belum
+  terbukti bisa dipakai.
+
+Perintah dan berkas timer ditulis lengkap di `docs/deployment.md`.
 
 ### Development di Windows
 
