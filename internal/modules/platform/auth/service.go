@@ -31,6 +31,24 @@ func NewService(platformDB *sqlx.DB, tokens *appauth.TokenManager, accessTTL, re
 	return &Service{db: platformDB, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
 }
 
+// dummyPasswordHash is a valid bcrypt hash of an unused, unguessable
+// password. Login always runs exactly one VerifyPassword call — against
+// the real user's hash when found, or against this fixed hash when not —
+// so response timing never reveals whether an email exists/is active
+// versus exists-with-a-wrong-password. (Amendment, added during Task 12
+// execution: the original version below skipped VerifyPassword entirely
+// via && short-circuiting whenever the user wasn't found or was inactive,
+// creating a measurable timing side-channel for email enumeration.)
+var dummyPasswordHash = mustHashDummyPassword()
+
+func mustHashDummyPassword() string {
+	hash, err := appauth.HashPassword("not-a-real-password-used-only-for-constant-time-comparison")
+	if err != nil {
+		panic(err)
+	}
+	return hash
+}
+
 func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, error) {
 	if err := s.rateLimiter.Check(ctx, appauth.ScopePlatform, nil, req.Email); err != nil {
 		return LoginResponse{}, err
@@ -40,7 +58,17 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 	err := s.db.GetContext(ctx, &u,
 		`SELECT id, email, password_hash, is_active FROM users WHERE email = $1 AND deleted_at IS NULL`,
 		req.Email)
-	valid := err == nil && u.IsActive && appauth.VerifyPassword(u.PasswordHash, req.Password)
+	found := err == nil && u.IsActive
+
+	hashToCheck := dummyPasswordHash
+	if found {
+		hashToCheck = u.PasswordHash
+	}
+	// Always call VerifyPassword — on the real hash if found, on a fixed
+	// dummy hash otherwise — so this line's cost (dominated by bcrypt) is
+	// the same on every path regardless of whether the user exists.
+	passwordOK := appauth.VerifyPassword(hashToCheck, req.Password)
+	valid := found && passwordOK
 
 	s.rateLimiter.Record(ctx, appauth.ScopePlatform, nil, req.Email, valid)
 	if !valid {
