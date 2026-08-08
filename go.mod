@@ -1,9 +1,9 @@
 module go-api-starter
 
-go 1.22
+go 1.25.0
 
 require (
-	github.com/go-playground/validator/v10 v10.27.0
+	github.com/go-playground/validator/v10 v10.30.3
 	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/joho/godotenv v1.5.1
 )
