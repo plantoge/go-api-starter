@@ -1926,6 +1926,20 @@ var PlatformFS embed.FS
 ```
 
 Create `internal/migration/runner.go`:
+
+**Amendment (added during Task 14 execution):** `TenantSchemaVersion` (below)
+originally instantiated a full `*migrate.Migrate`/postgres driver via
+`newMigrate`/`WithInstance` just to read the current version. That driver
+checks out a **dedicated `*sql.Conn` from the pool and holds it until an
+explicit `Close()`** — which nothing on this read path ever called. Task 14
+made this function back `middleware.TenantLookup`, i.e. it now runs on
+every `RequireTenant` cache miss (Task 11) — so every cache miss leaked one
+pooled connection permanently, exhausting the pool under load. Fixed by
+querying `schema_migrations` directly instead of going through
+golang-migrate's own machinery; `MigrateTenantUp` below (the rarer,
+CLI-only, migration-*applying* path) is unaffected and still uses
+`newMigrate` as before.
+
 ```go
 package migration
 
@@ -1941,6 +1955,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"go-api-starter/internal/database"
 )
 
 func newMigrate(db *sql.DB, fsys embed.FS, dir, schemaName string) (*migrate.Migrate, error) {
@@ -2344,20 +2360,26 @@ func MigrateTenantUp(db *sql.DB, schemaName string) error {
 
 // TenantSchemaVersion reports the migration version currently applied to
 // schemaName, and whether it's dirty (failed mid-migration). version is 0
-// with dirty=false if no migration has ever been applied.
+// with dirty=false if no migration has ever been applied. schemaName must
+// already have been provisioned (its schema_migrations table exists) —
+// every caller of this function only reaches it for a tenant that
+// Provision (Task 14) already created and migrated.
 func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error) {
-	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
-	if err != nil {
-		return 0, false, err
+	if !database.ValidSchemaName(schemaName) {
+		return 0, false, fmt.Errorf("invalid schema name %q", schemaName)
 	}
-	v, d, err := m.Version()
-	if err == migrate.ErrNilVersion {
+	query := `SELECT version, dirty FROM "` + schemaName + `".schema_migrations LIMIT 1`
+	var v int64
+	var d bool
+	err = db.QueryRow(query).Scan(&v, &d)
+	switch {
+	case err == sql.ErrNoRows:
 		return 0, false, nil
-	}
-	if err != nil {
+	case err != nil:
 		return 0, false, err
+	default:
+		return uint(v), d, nil
 	}
-	return v, d, nil
 }
 
 // LatestTenantVersion returns the highest migration version compiled into
@@ -5058,6 +5080,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// Amendment (added during Task 14 execution): the original version of
+// this struct had 9 fields, but platform.tenants (000002_create_tenants_
+// table.up.sql) has 12 columns — it also carries created_by, updated_by,
+// deleted_by. Every repository method below queries `SELECT *`, and sqlx
+// runs in strict mode by default (no .Unsafe() call anywhere in this
+// codebase) — a SELECT * into a struct missing destination columns fails
+// every single call with "missing destination name created_by in *Tenant"
+// at runtime. That broke every read path in this module, including
+// Repository.FindByID, which is the middleware.TenantLookup implementation
+// the auth middleware (Task 11) depends on for every tenant request.
 type Tenant struct {
 	ID          uuid.UUID  `db:"id"`
 	Code        string     `db:"code"`
@@ -5068,6 +5100,9 @@ type Tenant struct {
 	CreatedAt   time.Time  `db:"created_at"`
 	UpdatedAt   time.Time  `db:"updated_at"`
 	DeletedAt   *time.Time `db:"deleted_at"`
+	CreatedBy   *uuid.UUID `db:"created_by"`
+	UpdatedBy   *uuid.UUID `db:"updated_by"`
+	DeletedBy   *uuid.UUID `db:"deleted_by"`
 }
 ```
 
@@ -5103,12 +5138,14 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
 	"go-api-starter/internal/middleware"
 	"go-api-starter/internal/migration"
 )
@@ -5134,9 +5171,21 @@ func (r *Repository) FindByCode(ctx context.Context, code string) (Tenant, error
 	return t, nil
 }
 
+// Amendment (added during Task 14 execution): added ORDER BY created_at
+// DESC LIMIT 1. This query has no code-uniqueness constraint to lean on —
+// deleted_at IS NULL isn't part of the WHERE clause here — so once a
+// tenant is purged (Purge below now hard-deletes its row) and a new
+// tenant re-provisions the same code, this can no longer return more than
+// one candidate row for that code. Before this fix, an ORDER-less SELECT
+// with more than one matching row (which could happen before the Purge
+// fix below, when a purged tenant's row was left behind) could
+// nondeterministically return the wrong one — including a live
+// re-provisioned tenant instead of the intended old one — which is
+// dangerous given this feeds Purge's DROP SCHEMA.
 func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string) (Tenant, error) {
 	var t Tenant
-	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE code = $1`, code)
+	err := r.db.GetContext(ctx, &t,
+		`SELECT * FROM tenants WHERE code = $1 ORDER BY created_at DESC LIMIT 1`, code)
 	if err == sql.ErrNoRows {
 		return Tenant{}, apperror.NotFound("tenant tidak ditemukan")
 	}
@@ -5150,13 +5199,27 @@ func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string
 // tenant's platform-side status and its schema's migration version in one
 // call, because RequireTenant needs both to decide whether a request may
 // proceed, and both are cached together under the same TTL.
+//
+// Amendment (added during Task 14 execution): the original version mapped
+// every error (including a transient connection failure) to
+// apperror.NotFound, which made a real outage indistinguishable from "this
+// tenant genuinely doesn't exist" at the auth-middleware layer. Now only
+// sql.ErrNoRows maps to NotFound; anything else is a real Internal error.
+// Also added the same ValidSchemaName check WithTenant (Task 5) and Purge
+// use before t.SchemaName reaches SQL, for defense-in-depth consistency.
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.TenantRecord, error) {
 	var t Tenant
 	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL`, id)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		return middleware.TenantRecord{}, apperror.NotFound("tenant tidak ditemukan")
 	}
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
 
+	if !database.ValidSchemaName(t.SchemaName) {
+		return middleware.TenantRecord{}, apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
+	}
 	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
 	if err != nil {
 		return middleware.TenantRecord{}, apperror.Internal(err)
@@ -5207,12 +5270,14 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"go-api-starter/internal/apperror"
 	appauth "go-api-starter/internal/auth"
@@ -5277,6 +5342,20 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 		return ProvisionResult{}, apperror.Internal(fmt.Errorf("normalized code %q is not a valid schema name", code))
 	}
 
+	// Amendment (added during Task 14 execution): a soft-deleted (but not
+	// yet purged) tenant still owns its schema on disk even though its
+	// code is free again for a new row (tenants_code_key is a partial
+	// unique index on deleted_at IS NULL). Without this check, Provision
+	// would pass the INSERT below, then fail deep inside the transaction
+	// at CREATE SCHEMA with a confusing "already exists" error. Checking
+	// up front surfaces a clear conflict instead. An active/provisioning
+	// row with this code is deliberately NOT rejected here — it falls
+	// through to the INSERT below, which is where the real uniqueness
+	// constraint lives and gets classified correctly.
+	if existing, findErr := s.repo.FindByCodeIncludingDeleted(ctx, code); findErr == nil && existing.DeletedAt != nil {
+		return ProvisionResult{}, apperror.Conflict("kode tenant ini pernah dipakai dan belum di-purge — tunggu purge selesai atau gunakan kode lain")
+	}
+
 	tx, err := s.rawDB.BeginTx(ctx, nil)
 	if err != nil {
 		return ProvisionResult{}, apperror.Internal(err)
@@ -5287,7 +5366,18 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO platform.tenants (id, code, name, schema_name, status) VALUES ($1, $2, $3, $4, 'provisioning')`,
 		tenantID, code, in.Name, code); err != nil {
-		return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+		// Amendment (added during Task 14 execution): the original code
+		// mapped every insert error to "kode tenant sudah dipakai",
+		// including a missing table, a lost connection, or any other real
+		// failure — hiding the actual cause from both logs and the
+		// operator. Only a genuine unique-constraint violation on
+		// tenants_code_key (SQLSTATE 23505) is a duplicate code; anything
+		// else is a real Internal error.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+		}
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("insert tenant row: %w", err))
 	}
 
 	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA "`+code+`"`); err != nil {
@@ -5411,6 +5501,20 @@ const purgeMinAge = 30 * 24 * time.Hour
 // unless the tenant has been soft-deleted for at least purgeMinAge — DROP
 // SCHEMA can't be undone, and this delay is the only safety net against a
 // mistyped tenant code destroying a client's data outright.
+//
+// Amendment (added during Task 14 execution): the original version
+// dropped the schema but left the platform.tenants row behind. Because
+// tenants_code_key/tenants_schema_name_key are partial unique indexes
+// (WHERE deleted_at IS NULL), that stale row made its code reusable —
+// re-provisioning the same code, then a second (accidental or delayed)
+// Purge call on that code, could destroy the newly re-provisioned, LIVE
+// tenant's schema instead of the original one, because
+// FindByCodeIncludingDeleted had no way to distinguish them. Purge now
+// hard-deletes the row in the same transaction as the DROP SCHEMA — both
+// are DDL/DML PostgreSQL can roll back together — so a purged code can
+// never again resolve to more than one row, closing that path entirely
+// (paired with the ORDER BY fix on FindByCodeIncludingDeleted above,
+// which is now also redundant as a safety net rather than load-bearing).
 func (s *Service) Purge(ctx context.Context, code string) error {
 	t, err := s.repo.FindByCodeIncludingDeleted(ctx, code)
 	if err != nil {
@@ -5425,9 +5529,23 @@ func (s *Service) Purge(ctx context.Context, code string) error {
 	if !database.ValidSchemaName(t.SchemaName) {
 		return apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
 	}
-	if _, err := s.rawDB.ExecContext(ctx, `DROP SCHEMA "`+t.SchemaName+`" CASCADE`); err != nil {
+
+	tx, err := s.rawDB.BeginTx(ctx, nil)
+	if err != nil {
 		return apperror.Internal(err)
 	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DROP SCHEMA IF EXISTS "`+t.SchemaName+`" CASCADE`); err != nil {
+		return apperror.Internal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM platform.tenants WHERE id = $1`, t.ID); err != nil {
+		return apperror.Internal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return apperror.Internal(err)
+	}
+
 	s.resolver.Invalidate(t.ID)
 	return nil
 }

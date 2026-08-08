@@ -1935,6 +1935,21 @@ var PlatformFS embed.FS
 ```
 
 Buat `internal/migration/runner.go`:
+
+**Amandemen (ditambahkan saat eksekusi Tugas 14):** `TenantSchemaVersion`
+(di bawah) awalnya membuat `*migrate.Migrate`/driver postgres lengkap
+lewat `newMigrate`/`WithInstance` hanya untuk membaca versi saat ini.
+Driver itu mengambil **satu `*sql.Conn` khusus dari pool dan menahannya
+sampai ada `Close()` eksplisit** — yang tidak pernah dipanggil di jalur
+baca ini. Tugas 14 membuat fungsi ini menjadi implementasi
+`middleware.TenantLookup`, artinya sekarang berjalan di setiap cache-miss
+`RequireTenant` (Tugas 11) — jadi setiap cache-miss membocorkan satu
+koneksi pool secara permanen, menghabiskan pool di bawah beban. Diperbaiki
+dengan query langsung ke `schema_migrations`, bukan lewat mesin
+golang-migrate; `MigrateTenantUp` di bawah (jalur yang lebih jarang,
+khusus CLI, yang benar-benar *menerapkan* migrasi) tidak terpengaruh dan
+tetap memakai `newMigrate` seperti semula.
+
 ```go
 package migration
 
@@ -1950,6 +1965,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"go-api-starter/internal/database"
 )
 
 func newMigrate(db *sql.DB, fsys embed.FS, dir, schemaName string) (*migrate.Migrate, error) {
@@ -2353,20 +2370,26 @@ func MigrateTenantUp(db *sql.DB, schemaName string) error {
 
 // TenantSchemaVersion reports the migration version currently applied to
 // schemaName, and whether it's dirty (failed mid-migration). version is 0
-// with dirty=false if no migration has ever been applied.
+// with dirty=false if no migration has ever been applied. schemaName must
+// already have been provisioned (its schema_migrations table exists) —
+// every caller of this function only reaches it for a tenant that
+// Provision (Task 14) already created and migrated.
 func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error) {
-	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
-	if err != nil {
-		return 0, false, err
+	if !database.ValidSchemaName(schemaName) {
+		return 0, false, fmt.Errorf("invalid schema name %q", schemaName)
 	}
-	v, d, err := m.Version()
-	if err == migrate.ErrNilVersion {
+	query := `SELECT version, dirty FROM "` + schemaName + `".schema_migrations LIMIT 1`
+	var v int64
+	var d bool
+	err = db.QueryRow(query).Scan(&v, &d)
+	switch {
+	case err == sql.ErrNoRows:
 		return 0, false, nil
-	}
-	if err != nil {
+	case err != nil:
 		return 0, false, err
+	default:
+		return uint(v), d, nil
 	}
-	return v, d, nil
 }
 
 // LatestTenantVersion returns the highest migration version compiled into
@@ -5070,6 +5093,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// Amandemen (ditambahkan saat eksekusi Tugas 14): versi awal struct ini
+// punya 9 field, tapi platform.tenants (000002_create_tenants_table.up.sql)
+// punya 12 kolom — ada juga created_by, updated_by, deleted_by. Setiap
+// method repository melakukan `SELECT *`, dan sqlx berjalan dalam mode
+// ketat secara default (tidak ada pemanggilan `.Unsafe()` di manapun dalam
+// codebase ini) — SELECT * ke struct yang kurang kolom tujuan gagal di
+// SETIAP pemanggilan saat runtime dengan "missing destination name
+// created_by in *Tenant". Itu merusak seluruh jalur baca di modul ini,
+// termasuk Repository.FindByID, yang merupakan implementasi
+// middleware.TenantLookup yang menjadi sandaran middleware auth (Tugas 11)
+// untuk setiap request tenant.
 type Tenant struct {
 	ID          uuid.UUID  `db:"id"`
 	Code        string     `db:"code"`
@@ -5080,6 +5114,9 @@ type Tenant struct {
 	CreatedAt   time.Time  `db:"created_at"`
 	UpdatedAt   time.Time  `db:"updated_at"`
 	DeletedAt   *time.Time `db:"deleted_at"`
+	CreatedBy   *uuid.UUID `db:"created_by"`
+	UpdatedBy   *uuid.UUID `db:"updated_by"`
+	DeletedBy   *uuid.UUID `db:"deleted_by"`
 }
 ```
 
@@ -5115,12 +5152,14 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
 	"go-api-starter/internal/middleware"
 	"go-api-starter/internal/migration"
 )
@@ -5146,9 +5185,22 @@ func (r *Repository) FindByCode(ctx context.Context, code string) (Tenant, error
 	return t, nil
 }
 
+// Amandemen (ditambahkan saat eksekusi Tugas 14): ditambahkan ORDER BY
+// created_at DESC LIMIT 1. Query ini tidak punya batasan keunikan kode
+// untuk disandarkan — deleted_at IS NULL bukan bagian klausa WHERE di
+// sini — jadi begitu sebuah tenant di-purge (Purge di bawah sekarang
+// hard-delete row-nya) dan tenant baru me-reprovisioning kode yang sama,
+// query ini tidak lagi bisa mengembalikan lebih dari satu kandidat row
+// untuk kode itu. Sebelum perbaikan ini, SELECT tanpa ORDER dengan lebih
+// dari satu row cocok (yang bisa terjadi sebelum perbaikan Purge di
+// bawah, saat row tenant yang di-purge tertinggal) bisa
+// nondeterministically mengembalikan row yang salah — termasuk tenant
+// hidup yang baru di-reprovisioning, bukan tenant lama yang dimaksud —
+// yang berbahaya mengingat ini menjadi input Purge's DROP SCHEMA.
 func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string) (Tenant, error) {
 	var t Tenant
-	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE code = $1`, code)
+	err := r.db.GetContext(ctx, &t,
+		`SELECT * FROM tenants WHERE code = $1 ORDER BY created_at DESC LIMIT 1`, code)
 	if err == sql.ErrNoRows {
 		return Tenant{}, apperror.NotFound("tenant tidak ditemukan")
 	}
@@ -5162,13 +5214,28 @@ func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string
 // tenant's platform-side status and its schema's migration version in one
 // call, because RequireTenant needs both to decide whether a request may
 // proceed, and both are cached together under the same TTL.
+//
+// Amandemen (ditambahkan saat eksekusi Tugas 14): versi awal memetakan
+// setiap error (termasuk kegagalan koneksi sementara) ke apperror.NotFound,
+// yang membuat outage nyata tidak bisa dibedakan dari "tenant ini memang
+// tidak ada" di layer middleware auth. Sekarang hanya sql.ErrNoRows yang
+// dipetakan ke NotFound; selainnya adalah Internal error yang sebenarnya.
+// Juga ditambahkan pengecekan ValidSchemaName yang sama seperti WithTenant
+// (Tugas 5) dan Purge sebelum t.SchemaName mencapai SQL, demi konsistensi
+// defense-in-depth.
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.TenantRecord, error) {
 	var t Tenant
 	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL`, id)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		return middleware.TenantRecord{}, apperror.NotFound("tenant tidak ditemukan")
 	}
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
 
+	if !database.ValidSchemaName(t.SchemaName) {
+		return middleware.TenantRecord{}, apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
+	}
 	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
 	if err != nil {
 		return middleware.TenantRecord{}, apperror.Internal(err)
@@ -5219,12 +5286,14 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"go-api-starter/internal/apperror"
 	appauth "go-api-starter/internal/auth"
@@ -5289,6 +5358,21 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 		return ProvisionResult{}, apperror.Internal(fmt.Errorf("normalized code %q is not a valid schema name", code))
 	}
 
+	// Amandemen (ditambahkan saat eksekusi Tugas 14): tenant yang di-soft-
+	// delete (tapi belum di-purge) masih memiliki schema-nya di disk
+	// meskipun kodenya sudah bebas dipakai lagi untuk row baru
+	// (tenants_code_key adalah partial unique index pada deleted_at IS
+	// NULL). Tanpa pengecekan ini, Provision akan lolos INSERT di bawah,
+	// lalu gagal jauh di dalam transaksi pada CREATE SCHEMA dengan error
+	// "already exists" yang membingungkan. Pengecekan di awal ini
+	// menampilkan conflict yang jelas. Row aktif/provisioning dengan kode
+	// ini SENGAJA TIDAK ditolak di sini — dibiarkan lolos ke INSERT di
+	// bawah, tempat batasan keunikan sebenarnya berada dan diklasifikasi
+	// dengan benar.
+	if existing, findErr := s.repo.FindByCodeIncludingDeleted(ctx, code); findErr == nil && existing.DeletedAt != nil {
+		return ProvisionResult{}, apperror.Conflict("kode tenant ini pernah dipakai dan belum di-purge — tunggu purge selesai atau gunakan kode lain")
+	}
+
 	tx, err := s.rawDB.BeginTx(ctx, nil)
 	if err != nil {
 		return ProvisionResult{}, apperror.Internal(err)
@@ -5299,7 +5383,18 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO platform.tenants (id, code, name, schema_name, status) VALUES ($1, $2, $3, $4, 'provisioning')`,
 		tenantID, code, in.Name, code); err != nil {
-		return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+		// Amandemen (ditambahkan saat eksekusi Tugas 14): kode awal
+		// memetakan setiap error insert ke "kode tenant sudah dipakai",
+		// termasuk table yang hilang, koneksi terputus, atau error nyata
+		// lainnya — menyembunyikan penyebab sebenarnya dari log maupun
+		// operator. Hanya pelanggaran unique-constraint sungguhan pada
+		// tenants_code_key (SQLSTATE 23505) yang berarti kode duplikat;
+		// selainnya adalah Internal error yang sebenarnya.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+		}
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("insert tenant row: %w", err))
 	}
 
 	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA "`+code+`"`); err != nil {
@@ -5423,6 +5518,22 @@ const purgeMinAge = 30 * 24 * time.Hour
 // unless the tenant has been soft-deleted for at least purgeMinAge — DROP
 // SCHEMA can't be undone, and this delay is the only safety net against a
 // mistyped tenant code destroying a client's data outright.
+//
+// Amandemen (ditambahkan saat eksekusi Tugas 14): versi awal menghapus
+// schema tapi meninggalkan row platform.tenants. Karena
+// tenants_code_key/tenants_schema_name_key adalah partial unique index
+// (WHERE deleted_at IS NULL), row basi itu membuat kodenya bisa dipakai
+// ulang — reprovisioning dengan kode yang sama, lalu pemanggilan Purge
+// kedua (tidak sengaja atau tertunda) pada kode itu, bisa menghancurkan
+// schema tenant HIDUP yang baru direprovisioning, bukan tenant lama yang
+// dimaksud, karena FindByCodeIncludingDeleted tidak punya cara membedakan
+// keduanya. Purge sekarang hard-delete row-nya dalam transaksi yang sama
+// dengan DROP SCHEMA — keduanya DDL/DML yang bisa di-rollback bersama
+// oleh PostgreSQL — jadi kode yang sudah di-purge tidak akan pernah lagi
+// resolve ke lebih dari satu row, menutup celah ini sepenuhnya
+// (dipasangkan dengan perbaikan ORDER BY pada FindByCodeIncludingDeleted
+// di atas, yang sekarang jadi jaring pengaman tambahan, bukan lagi
+// satu-satunya penahan).
 func (s *Service) Purge(ctx context.Context, code string) error {
 	t, err := s.repo.FindByCodeIncludingDeleted(ctx, code)
 	if err != nil {
@@ -5437,9 +5548,23 @@ func (s *Service) Purge(ctx context.Context, code string) error {
 	if !database.ValidSchemaName(t.SchemaName) {
 		return apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
 	}
-	if _, err := s.rawDB.ExecContext(ctx, `DROP SCHEMA "`+t.SchemaName+`" CASCADE`); err != nil {
+
+	tx, err := s.rawDB.BeginTx(ctx, nil)
+	if err != nil {
 		return apperror.Internal(err)
 	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DROP SCHEMA IF EXISTS "`+t.SchemaName+`" CASCADE`); err != nil {
+		return apperror.Internal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM platform.tenants WHERE id = $1`, t.ID); err != nil {
+		return apperror.Internal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return apperror.Internal(err)
+	}
+
 	s.resolver.Invalidate(t.ID)
 	return nil
 }
