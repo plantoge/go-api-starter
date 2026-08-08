@@ -7712,3 +7712,618 @@ git commit -m "test: end-to-end tenant isolation across two tenants with identic
 ```
 
 ---
+
+### Tugas 21: Artefak deployment, `CLAUDE.md`, dan dokumentasi
+
+Dokumentasi ditulis sekarang, sekali, terhadap kode yang sudah selesai — bukan lebih awal dan bertahap mengejar target yang terus bergerak. Ini pilihan sengaja: aturan spec adalah "dokumentasi harus selalu cocok dengan kode," dan menulisnya setelah Tugas 20 adalah satu-satunya titik di rencana ini di mana itu benar secara konstruksi. (`README.md` tetap di luar cakupan sesuai spec — ditulis setelah starter ini dipakai membangun sesuatu yang nyata.)
+
+Berkas dokumentasi (`CLAUDE.md`, `docs/*.md`) di sini ditulis dalam Bahasa Indonesia — konsisten dengan konvensi bahasa di Batasan Global: ini murni teks yang dibaca manusia, tidak ada identifier Go di dalamnya, jadi tidak ada alasan menulisnya dalam Bahasa Inggris.
+
+**Berkas:**
+- Buat: `deploy/app-api.service`
+- Buat: `deploy/app-cleanup.service`
+- Buat: `deploy/app-cleanup.timer`
+- Buat: `deploy/pg-backup.service`
+- Buat: `deploy/pg-backup.timer`
+- Buat: `deploy/pg-backup.sh`
+- Buat: `deploy/Caddyfile`
+- Buat: `deploy/deploy.sh`
+- Buat: `CLAUDE.md`
+- Buat: `docs/getting-started.md`
+- Buat: `docs/adding-a-module.md`
+- Buat: `docs/multi-tenancy.md`
+- Buat: `docs/database-conventions.md`
+- Buat: `docs/deployment.md`
+
+- [ ] **Langkah 1: Tulis unit systemd**
+
+Buat `deploy/app-api.service`:
+```ini
+[Unit]
+Description=App API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=app
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/api
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Buat `deploy/app-cleanup.service`:
+```ini
+[Unit]
+Description=Run cli cleanup (expired tokens, old login attempts)
+
+[Service]
+Type=oneshot
+User=app
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/cli cleanup
+```
+
+Buat `deploy/app-cleanup.timer`:
+```ini
+[Unit]
+Description=Daily cli cleanup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Buat `deploy/pg-backup.service`:
+```ini
+[Unit]
+Description=PostgreSQL backup
+
+[Service]
+Type=oneshot
+User=app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/deploy/pg-backup.sh
+```
+
+Buat `deploy/pg-backup.timer`:
+```ini
+[Unit]
+Description=Daily PostgreSQL backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+- [ ] **Langkah 2: Tulis script backup**
+
+Buat `deploy/pg-backup.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+BACKUP_DIR="/var/backups/app-db"
+mkdir -p "$BACKUP_DIR"
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+FILE="$BACKUP_DIR/appdb-$TIMESTAMP.dump"
+
+pg_dump -Fc -h "${DB_HOST:-localhost}" -U "${DB_USER:-app}" "${DB_NAME:-appdb}" > "$FILE"
+
+# Simpan 35 hari secara lokal; kebijakan retensi sesungguhnya ada di mana
+# pun file ini disalin keluar server.
+find "$BACKUP_DIR" -name "appdb-*.dump" -mtime +35 -delete
+
+echo "backup tersimpan: $FILE"
+echo "PENGINGAT: backup ini hanya berguna kalau disalin keluar dari server ini"
+echo "           (rsync/rclone ke penyimpanan remote) dan proses restore-nya sudah diuji."
+```
+
+- [ ] **Langkah 3: Tulis config Caddy**
+
+Buat `deploy/Caddyfile`:
+```
+{$APP_DOMAIN} {
+    handle /api/* {
+        reverse_proxy localhost:8080
+    }
+    handle {
+        root * /var/www/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}
+```
+
+- [ ] **Langkah 4: Tulis script deploy**
+
+Buat `deploy/deploy.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /opt/app
+
+echo "==> menarik kode terbaru"
+git pull
+
+echo "==> membackup binary saat ini"
+cp -f api api.backup 2>/dev/null || true
+cp -f cli cli.backup 2>/dev/null || true
+
+echo "==> build"
+go build -o api ./cmd/api
+go build -o cli ./cmd/cli
+
+echo "==> migrasi schema platform"
+./cli migrate platform up
+
+echo "==> migrasi schema tenant"
+./cli migrate tenant up --all
+
+echo "==> sinkronisasi permission"
+./cli permission sync --all
+
+echo "==> restart service"
+sudo systemctl restart app-api
+
+echo "==> selesai"
+```
+
+Jadikan executable:
+```bash
+chmod +x deploy/deploy.sh deploy/pg-backup.sh
+```
+
+- [ ] **Langkah 5: Tulis `CLAUDE.md`**
+
+Buat `CLAUDE.md`:
+```markdown
+# CLAUDE.md
+
+Aturan untuk bekerja di repository ini. Melanggar salah satunya punya
+konsekuensi nyata — biasanya data bocor lintas tenant — bukan sekadar
+soal gaya penulisan.
+
+## Multi-tenancy (lihat `docs/multi-tenancy.md` untuk penjelasan lengkap)
+
+- **Setiap query data tenant lewat `database.WithTenant(ctx, fn)`.**
+  Tidak ada repository yang memegang `*sqlx.DB` polos untuk tabel tenant.
+  Tanpa pengecualian.
+- **`*fiber.Ctx` tidak pernah keluar dari layer handler.** Service dan
+  repository hanya menerima `context.Context`. Fiber dibangun di atas
+  `fasthttp`, yang memakai ulang objek request antar request — apa pun
+  yang lolos dari handler dengan referensi `*fiber.Ctx` yang masih hidup
+  bisa berakhir membaca data request lain (mungkin milik tenant lain).
+- **Setiap parameter query `sort` divalidasi terhadap whitelist eksplisit**
+  (`pagination.Parse` + peta `Sortable` milik modul) sebelum diinterpolasi
+  ke `ORDER BY`. Jangan pernah mengoper nilai query mentah ke SQL, bahkan
+  secara tidak langsung.
+
+## Batas modul
+
+- **Satu modul tidak pernah memanggil repository modul lain secara
+  langsung.** Interaksi lintas modul lewat *service* modul lain.
+- Modul tenant-scoped baru menyalin bentuk
+  `internal/modules/tenant/user/` — lihat `docs/adding-a-module.md`.
+
+## Error dan response
+
+- Service mengembalikan `*apperror.Error`, tidak pernah `error` polos
+  yang membungkus error driver langsung ke client.
+- Handler tidak pernah memanggil `c.Status(...)` sendiri —
+  `response.Success` / `response.Error` yang memegang itu.
+
+## Database
+
+- ID dibuat di Go (`uuid.New()`), tidak pernah lewat default sisi DB —
+  lihat `docs/database-conventions.md` untuk alasannya.
+- Tabel baru mengikuti konvensi kolom audit di
+  `docs/database-conventions.md`, kecuali tabel penghubung atau tabel
+  log/token (dua pengecualian yang sudah didokumentasikan).
+
+## Testing
+
+- Integration test memakai `testsupport.OpenTestDB` / `OpenTestPlatformDB`,
+  didukung database PostgreSQL lokal `app_test` — tidak pernah Docker,
+  tidak pernah testcontainers.
+- Test yang membuat schema wajib men-drop-nya di `t.Cleanup`.
+```
+
+- [ ] **Langkah 6: Tulis `docs/getting-started.md`**
+
+Buat `docs/getting-started.md`:
+```markdown
+# Mulai Cepat (development di Windows)
+
+## 1. Install prasyarat
+
+- Go 1.22+
+- PostgreSQL, jalan lokal
+- `air` untuk hot reload: `go install github.com/air-verse/air@latest`
+
+## 2. Buat database
+
+```powershell
+psql -U postgres -c "CREATE ROLE app LOGIN PASSWORD 'changeme';"
+psql -U postgres -c "CREATE DATABASE appdb OWNER app;"
+psql -U postgres -c "CREATE DATABASE app_test OWNER app;"
+```
+
+## 3. Atur environment
+
+```powershell
+copy .env.example .env
+copy .env.test.example .env.test
+```
+Sesuaikan `DB_PASSWORD` di kedua berkas kalau kamu pakai password berbeda di atas.
+
+## 4. Jalankan migrasi dan buat admin pertama
+
+```powershell
+go run ./cmd/cli migrate platform up
+go run ./cmd/cli admin create --email=you@example.com --name="Nama Kamu"
+```
+Salin password yang dicetak — hanya ditampilkan sekali.
+
+## 5. Buat tenant pertama
+
+```powershell
+go run ./cmd/cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=owner@acme.test
+```
+Salin juga password owner yang dicetak.
+
+## 6. Jalankan API
+
+```powershell
+air
+```
+atau tanpa hot reload:
+```powershell
+go run ./cmd/api
+```
+
+## 7. Coba
+
+```powershell
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/api/v1/auth/login -H "Content-Type: application/json" -d "{\"tenant_code\":\"acme_corp\",\"email\":\"owner@acme.test\",\"password\":\"<password owner>\"}"
+```
+
+## Menjalankan test
+
+```powershell
+go test ./...
+```
+Integration test terhubung ke `app_test` memakai `.env.test` dan otomatis
+di-skip kalau PostgreSQL tidak bisa diakses.
+```
+
+- [ ] **Langkah 7: Tulis `docs/adding-a-module.md`**
+
+Buat `docs/adding-a-module.md`:
+```markdown
+# Menambah Modul
+
+Setiap modul tenant-scoped mengikuti bentuk
+`internal/modules/tenant/user/` — salin folder itu sebagai titik awal.
+
+## Bentuk berkas
+
+```
+modules/tenant/<nama>/
+  model.go       # struct baris DB, tag `db:"..."`
+  dto.go         # struct request/response, tag `json:"..."` + `validate:"..."`
+  repository.go  # SQL lewat sqlx, selalu lewat database.WithTenant
+  service.go     # business logic, hanya context.Context, tanpa tipe HTTP
+  handler.go     # hanya Fiber, konversi ke/dari DTO, tidak pernah menyentuh SQL
+```
+
+## Langkah-langkah
+
+1. **Tambah migrasi.** Buat
+   `internal/migration/tenant/0000N_create_<nama>_table.up.sql` (dan
+   `.down.sql`), ikuti `database-conventions.md` untuk kolom audit dan
+   soft delete. Naikkan nomor versinya.
+2. **Tulis `model.go`** — satu struct per tabel, tag `db:"..."` cocok
+   persis dengan nama kolom.
+3. **Tulis `repository.go`** — setiap method membungkus query-nya dalam
+   `db.WithTenant(ctx, func(tx *sqlx.Tx) error {...})`. Deklarasikan
+   whitelist `Sortable map[string]string` untuk apa pun yang bisa
+   di-sort di endpoint list — jangan pernah menerima nilai query `sort`
+   mentah.
+4. **Tulis `dto.go`** — struct request dengan tag `validate:"..."`,
+   struct `View` untuk response, dan mapper `toView`.
+5. **Tulis `service.go`** — hanya bergantung pada repository dan
+   `context.Context`. Hashing password, panggilan eksternal, atau
+   panggilan lintas modul (lewat *service* modul lain, tidak pernah
+   repository-nya) masuk di sini.
+6. **Tulis `handler.go`** — parse body, panggil `validator.Validate`,
+   panggil service, terjemahkan hasilnya dengan `response.Success` /
+   `response.Error`. Jangan pernah menulis `c.Status(...)` langsung.
+7. **Tambah konstanta permission** di `internal/permission/constants.go`
+   untuk resource baru (`<nama>.view`, `<nama>.create`, ...), mengikuti
+   pola `user.*` yang sudah ada.
+8. **Sambungkan rute** di `internal/server/router.go`, di dalam grup
+   `tenantAPI`, masing-masing di belakang
+   `middleware.RequirePermission(permission.KonstantaKamu, deps.PermissionCache)`.
+9. **Tambahkan handler-nya ke `server.Dependencies`** dan konstruksi di
+   `cmd/api/main.go`.
+10. **Jalankan `cli permission sync --all`** setelah deploy, supaya
+    tenant yang sudah ada dapat baris permission baru.
+
+## Sub-grup modul
+
+Biarkan `modules/tenant/` datar sampai berisi 7–8 modul dan navigasi
+mulai sulit. Baru kelompokkan per domain, mis. `modules/tenant/sales/order/`,
+`modules/tenant/inventory/product/` — modulnya sendiri tidak berubah
+bentuk, cuma path-nya. **Modul tidak boleh memanggil repository modul
+lain secara langsung** — interaksi lintas modul selalu lewat *service*
+modul lain.
+```
+
+- [ ] **Langkah 8: Tulis `docs/multi-tenancy.md`**
+
+Buat `docs/multi-tenancy.md`:
+```markdown
+# Aturan Multi-Tenancy
+
+Dua aturan ini yang menjaga data tenant A tidak pernah muncul di
+response tenant B. Melanggar salah satunya adalah kebocoran data,
+bukan sekadar bug.
+
+## Aturan 1: semua akses data tenant lewat `database.WithTenant`
+
+```go
+// Benar
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
+	var u User
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		return tx.Get(&u, `SELECT * FROM users WHERE id = $1`, id)
+	})
+	return u, err
+}
+```
+```go
+// Salah — melewati scoping tenant sepenuhnya
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
+	var u User
+	err := r.pool.Get(&u, `SELECT * FROM users WHERE id = $1`, id) // tenant yang mana?!
+	return u, err
+}
+```
+`WithTenant` menjalankan query kamu di dalam transaksi dengan `SET LOCAL
+search_path` di-pin ke schema tenant si pemanggil — diambil dari
+`context.Context`, tidak pernah dari parameter request. `SET LOCAL`
+otomatis hilang saat transaksi selesai (commit maupun rollback), jadi
+satu koneksi tidak pernah bisa membawa schema satu tenant ke pemanggil
+berikutnya yang meminjamnya dari pool.
+
+## Aturan 2: `*fiber.Ctx` berhenti di handler
+
+Fiber dibangun di atas `fasthttp`, yang **memakai ulang** objek context-nya
+antar request demi performa. Kalau `*fiber.Ctx` (atau apa pun turunannya)
+lolos ke goroutine atau disimpan di mana pun, dia bisa diam-diam ditimpa
+oleh request yang sama sekali berbeda — termasuk milik tenant lain —
+sebelum sempat dibaca kembali.
+
+```go
+// Benar — handler mengonversi semua yang dibutuhkan sebelum memanggil service
+func (h *Handler) Get(c *fiber.Ctx) error {
+	id, _ := uuid.Parse(c.Params("id"))
+	view, err := h.svc.Get(c.UserContext(), id) // hanya context.Context, dari sini ke bawah
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, view)
+}
+```
+```go
+// Salah — jangan pernah lakukan ini
+func (h *Handler) Get(c *fiber.Ctx) error {
+	go func() {
+		log.Println(c.Params("id")) // c mungkin sudah jadi milik request lain saat ini
+	}()
+	return nil
+}
+```
+Service dan repository hanya pernah melihat `context.Context`. Ini bukan
+cuma soal keamanan — ini juga berarti business logic bisa di-unit-test
+tanpa menyalakan server HTTP.
+
+## Apa saja yang berakhir di `context.Context`
+
+Diisi oleh middleware, dibaca lewat `database.TenantFromContext` /
+`database.ActorFromContext`:
+- `database.TenantInfo` — ID tenant + nama schema, diisi `RequireTenant`
+- `database.Actor` — ID user + scope, diisi `RequirePlatform` /
+  `RequireTenant`
+
+Satu pengecualian adalah login: belum ada token yang membuktikan
+identitas tenant, jadi `modules/tenant/auth.Service.Login` membuat
+`TenantInfo` sendiri dari `tenant_code` yang sudah di-resolve, sebelum
+memanggil `WithTenant`. Semua jalur kode tenant-scoped lainnya
+menerimanya sudah diisi oleh middleware.
+```
+
+- [ ] **Langkah 9: Tulis `docs/database-conventions.md`**
+
+Buat `docs/database-conventions.md`:
+```markdown
+# Konvensi Database
+
+## Setiap tabel (dengan dua pengecualian di bawah)
+
+```sql
+created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+deleted_at  TIMESTAMPTZ NULL
+created_by  UUID NULL
+updated_by  UUID NULL
+deleted_by  UUID NULL
+```
+
+- `updated_at` dijaga oleh trigger per-schema
+  (`trigger_set_updated_at`) — pasang di setiap tabel baru:
+  ```sql
+  CREATE TRIGGER set_updated_at
+      BEFORE UPDATE ON nama_tabel_kamu
+      FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+  ```
+- Kolom `*_by` diisi dari `database.ActorFromContext(ctx)` di layer
+  repository, tidak pernah dibiarkan ditebak database.
+- ID berupa `UUID PRIMARY KEY` **tanpa default sisi database** — buat
+  dengan `uuid.New()` di Go sebelum insert. (Transaksi dengan `SET LOCAL
+  search_path` hanya mencari di schema tenant itu sendiri, bukan
+  `public`, jadi default sisi DB yang memanggil fungsi extension di
+  sana bisa gagal secara tidak terduga. Membuatnya di Go menghindari
+  masalah ini sepenuhnya.)
+
+## Soft delete
+
+Setiap query memfilter `WHERE deleted_at IS NULL` kecuali memang sedang
+mencari baris yang terhapus (seperti pengecekan 30-hari `tenant purge`).
+Kolom mana pun yang punya syarat keunikan butuh unique index **parsial**
+supaya nilai milik baris yang terhapus bisa dipakai ulang:
+```sql
+CREATE UNIQUE INDEX users_email_key ON users (email) WHERE deleted_at IS NULL;
+```
+
+## Pengecualian
+
+**Tabel penghubung** (`role_permissions`, `user_roles`): hanya
+`created_at` + `created_by`. Akses dicabut dengan `DELETE` biasa, bukan
+soft delete — menumpuk filter `deleted_at IS NULL` di setiap pengecekan
+permission tanpa manfaat itu tidak sepadan, dan riwayat
+pemberian/pencabutan akses lebih pas ada di log, bukan di tabel
+penghubung.
+
+**Tabel log/token** (`refresh_tokens`, `login_attempts`): hanya
+`created_at`. Sifatnya append-only — tidak ada baris di dalamnya yang
+pernah di-update atau soft-delete. Refresh token yang dicabut
+direpresentasikan lewat kolom `revoked_at` miliknya sendiri, bukan
+`deleted_at` standar.
+
+## Penamaan
+
+- Tabel: bentuk jamak, `snake_case` (`users`, `role_permissions`).
+- Kolom: `snake_case`, tanpa prefix tipe (`email`, bukan `str_email`).
+- Foreign key: `<nama_tabel_tunggal>_id` (`user_id`, `role_id`).
+```
+
+- [ ] **Langkah 10: Tulis `docs/deployment.md`**
+
+Buat `docs/deployment.md`:
+```markdown
+# Deployment
+
+Tanpa Docker sama sekali di stack ini — Go compile jadi satu binary
+statis, jadi server tidak butuh apa pun selain binary itu, PostgreSQL,
+dan Caddy.
+
+## Susunan di server
+
+```
+/opt/app/
+  api               # binary HTTP server
+  cli               # binary CLI (migrasi, provisioning, cleanup)
+  api.backup        # binary sebelumnya, untuk rollback instan
+
+/etc/app/api.env    # config, chmod 600
+/etc/systemd/system/app-api.service
+/etc/systemd/system/app-cleanup.service
+/etc/systemd/system/app-cleanup.timer
+```
+
+## Setup pertama kali
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin app
+sudo mkdir -p /opt/app /etc/app
+sudo chown app:app /opt/app
+git clone <url-repo-kamu> /opt/app
+sudo cp deploy/app-api.service deploy/app-cleanup.service deploy/app-cleanup.timer /etc/systemd/system/
+sudo cp .env.example /etc/app/api.env   # lalu edit dengan nilai sungguhan
+sudo chmod 600 /etc/app/api.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now app-cleanup.timer
+```
+
+Install Caddy, lalu:
+```bash
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # edit domain-nya dulu
+sudo systemctl reload caddy
+```
+
+### Ubuntu/Debian vs Rocky
+
+Package manager beda (`apt install postgresql caddy` vs
+`dnf install postgresql-server caddy`); selebihnya — unit systemd,
+binary Go, script deploy — identik.
+
+**Khusus Rocky:** SELinux aktif secara default dan memblokir Caddy
+terhubung ke `localhost:8080` kecuali diizinkan:
+```bash
+sudo setsebool -P httpd_can_network_connect 1
+```
+Tanpa ini, request lewat Caddy gagal dengan "Permission denied" yang
+kelihatannya tidak ada hubungannya dengan SELinux — kalau Caddy tidak
+bisa menjangkau API di Rocky, ini yang pertama dicek.
+
+## Deploy pembaruan
+
+```bash
+cd /opt/app
+./deploy/deploy.sh
+```
+Ini menarik kode, membackup binary saat ini, build ulang, menjalankan
+migrasi platform + tenant, sinkronisasi permission, dan restart service.
+Perkirakan downtime 1–2 detik saat restart — jadwalkan deploy di luar
+jam operasional untuk aplikasi dengan jam operasional tetap (seperti POS).
+
+### Rollback
+
+```bash
+cp api.backup api && sudo systemctl restart app-api
+```
+
+## Backup
+
+```bash
+sudo cp deploy/pg-backup.service deploy/pg-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pg-backup.timer
+```
+Ini menjalankan `pg_dump` harian dan menyimpan 35 hari secara lokal.
+**Salin backup keluar dari server** (rsync/rclone ke penyimpanan remote)
+— backup di disk yang sama yang ikut rusak tidak melindungi apa pun. Uji
+restore secara berkala; backup yang belum pernah diuji cuma tebakan,
+bukan backup.
+
+## Environment variable
+
+Lihat `.env.example` untuk daftar lengkap. Semuanya bisa
+dibaca/diubah tanpa build ulang — edit `/etc/app/api.env` lalu
+`systemctl restart app-api`.
+```
+
+- [ ] **Langkah 11: Commit**
+
+```bash
+git add deploy CLAUDE.md docs/getting-started.md docs/adding-a-module.md docs/multi-tenancy.md docs/database-conventions.md docs/deployment.md
+git commit -m "docs: deployment artifacts, CLAUDE.md, and full documentation set"
+```
+
+---
