@@ -1,0 +1,15 @@
+[Unit]
+Description=App API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=app
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/api
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

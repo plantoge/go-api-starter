@@ -1,0 +1,10 @@
+{$APP_DOMAIN} {
+    handle /api/* {
+        reverse_proxy localhost:8080
+    }
+    handle {
+        root * /var/www/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}

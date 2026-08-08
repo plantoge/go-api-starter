@@ -1,0 +1,9 @@
+[Unit]
+Description=Run cli cleanup (expired tokens, old login attempts)
+
+[Service]
+Type=oneshot
+User=app
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/cli cleanup

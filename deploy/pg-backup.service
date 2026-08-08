@@ -1,0 +1,8 @@
+[Unit]
+Description=PostgreSQL backup
+
+[Service]
+Type=oneshot
+User=app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/deploy/pg-backup.sh
