@@ -2923,3 +2923,475 @@ git commit -m "feat: password hashing, JWT issuing/verification, refresh tokens"
 ```
 
 ---
+
+### Tugas 9: Middleware inti — request ID, logging terstruktur, recover, CORS
+
+**Catatan desain soal komposisi context:** setiap middleware yang perlu memperkaya `context.Context` request wajib membangunnya di atas `c.UserContext()` yang *sedang berjalan*, tidak pernah dari `context.Background()` — kalau tidak, dia diam-diam membuang apa pun yang sudah ditempel middleware sebelumnya (seperti logger di tugas ini). Konvensi ini ditetapkan di sini dan diandalkan oleh tenant resolver Tugas 11.
+
+**Berkas:**
+- Buat: `internal/middleware/requestid.go`
+- Buat: `internal/middleware/logger.go`
+- Buat: `internal/middleware/recover.go`
+- Buat: `internal/middleware/cors.go`
+- Test: `internal/middleware/requestid_test.go`
+- Test: `internal/middleware/logger_test.go`
+- Test: `internal/middleware/recover_test.go`
+- Test: `internal/middleware/cors_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `middleware.RequestID() fiber.Handler`, `middleware.RequestIDFromCtx(c *fiber.Ctx) string`
+  - `middleware.Logger(base *slog.Logger) fiber.Handler`
+  - `middleware.SetLoggerInCtx(c *fiber.Ctx, l *slog.Logger)`, `middleware.LoggerFromCtx(c *fiber.Ctx) *slog.Logger`, `middleware.LoggerFromContext(ctx context.Context) *slog.Logger`
+  - `middleware.Recover() fiber.Handler`
+  - `middleware.CORS(allowedOrigins []string) fiber.Handler`
+
+- [ ] **Langkah 1: Tambah dependency ULID**
+
+Jalankan: `go get github.com/oklog/ulid/v2`
+
+- [ ] **Langkah 2: Tulis test request ID yang gagal**
+
+Buat `internal/middleware/requestid_test.go`:
+```go
+package middleware_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/middleware"
+)
+
+func TestRequestID_SetsHeaderAndLocal(t *testing.T) {
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	var seen string
+	app.Get("/x", func(c *fiber.Ctx) error {
+		seen = middleware.RequestIDFromCtx(c)
+		return c.SendStatus(200)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	header := resp.Header.Get("X-Request-ID")
+	if header == "" {
+		t.Error("X-Request-ID header not set")
+	}
+	if seen != header {
+		t.Errorf("RequestIDFromCtx() = %q, want it to match response header %q", seen, header)
+	}
+}
+
+func TestRequestID_UniquePerRequest(t *testing.T) {
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	resp1, _ := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	resp2, _ := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if resp1.Header.Get("X-Request-ID") == resp2.Header.Get("X-Request-ID") {
+		t.Error("two requests got the same request ID")
+	}
+}
+```
+
+- [ ] **Langkah 3: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 4: Implementasikan requestid.go**
+
+Buat `internal/middleware/requestid.go`:
+```go
+package middleware
+
+import (
+	"crypto/rand"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/oklog/ulid/v2"
+)
+
+const localsKeyRequestID = "request_id"
+
+// RequestID assigns a ULID to every request (sortable by time, unique
+// without coordination) and exposes it via the X-Request-ID response
+// header and RequestIDFromCtx — the id every error response and log line
+// ties back to.
+func RequestID() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var idStr string
+		if id, err := ulid.New(ulid.Timestamp(time.Now()), rand.Reader); err == nil {
+			idStr = id.String()
+		} else {
+			idStr = time.Now().Format("20060102150405.000000000")
+		}
+		c.Locals(localsKeyRequestID, idStr)
+		c.Set("X-Request-ID", idStr)
+		return c.Next()
+	}
+}
+
+func RequestIDFromCtx(c *fiber.Ctx) string {
+	id, _ := c.Locals(localsKeyRequestID).(string)
+	return id
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -run RequestID -v`
+Hasil: PASS.
+
+- [ ] **Langkah 6: Tulis test logger yang gagal**
+
+Buat `internal/middleware/logger_test.go`:
+```go
+package middleware_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/middleware"
+)
+
+func TestLogger_LogsRequestSummaryWithRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	base := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(base))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	wantID := resp.Header.Get("X-Request-ID")
+
+	var line map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatalf("decode log line: %v (raw: %s)", err, buf.String())
+	}
+	if line["request_id"] != wantID {
+		t.Errorf("logged request_id = %v, want %v", line["request_id"], wantID)
+	}
+	if line["method"] != "GET" {
+		t.Errorf("logged method = %v, want GET", line["method"])
+	}
+	if _, ok := line["duration_ms"]; !ok {
+		t.Error("log line missing duration_ms")
+	}
+}
+
+func TestLoggerFromContext_AvailableInsideHandler(t *testing.T) {
+	base := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(base))
+	var got *slog.Logger
+	app.Get("/x", func(c *fiber.Ctx) error {
+		got = middleware.LoggerFromContext(c.UserContext())
+		return c.SendStatus(200)
+	})
+
+	if _, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil)); err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if got == nil {
+		t.Fatal("LoggerFromContext returned nil inside the handler")
+	}
+}
+```
+
+- [ ] **Langkah 7: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -run Logger -v`
+Hasil: FAIL — `middleware.Logger` belum ada.
+
+- [ ] **Langkah 8: Implementasikan logger.go**
+
+Buat `internal/middleware/logger.go`:
+```go
+package middleware
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+)
+
+const localsKeyLogger = "logger"
+
+type loggerCtxKey struct{}
+
+// Logger attaches a per-request *slog.Logger (tagged with request_id) to
+// both fiber locals and the request's context.Context, then logs one
+// structured line per request after it completes. Downstream middleware
+// (the tenant resolver, Task 11) enriches the logger further — e.g. adding
+// tenant_id — via SetLoggerInCtx; by the time this middleware logs its
+// summary line, c.Next() has already returned, so it picks up whatever the
+// final, most-enriched logger is.
+func Logger(base *slog.Logger) fiber.Handler {
+	if base == nil {
+		base = slog.Default()
+	}
+	return func(c *fiber.Ctx) error {
+		start := time.Now()
+		SetLoggerInCtx(c, base.With("request_id", RequestIDFromCtx(c)))
+
+		err := c.Next()
+
+		LoggerFromCtx(c).Info("request",
+			"method", c.Method(),
+			"path", c.Path(),
+			"status", c.Response().StatusCode(),
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+		return err
+	}
+}
+
+// SetLoggerInCtx stores l in both fiber locals (for handlers holding a
+// *fiber.Ctx) and the request context (for services holding only a
+// context.Context). It builds on c.UserContext(), never
+// context.Background(), so it never discards values other middleware
+// already attached (e.g. tenant info).
+func SetLoggerInCtx(c *fiber.Ctx, l *slog.Logger) {
+	c.Locals(localsKeyLogger, l)
+	c.SetUserContext(context.WithValue(c.UserContext(), loggerCtxKey{}, l))
+}
+
+func LoggerFromCtx(c *fiber.Ctx) *slog.Logger {
+	if l, ok := c.Locals(localsKeyLogger).(*slog.Logger); ok {
+		return l
+	}
+	return slog.Default()
+}
+
+// LoggerFromContext is the context.Context-based counterpart of
+// LoggerFromCtx, for services that only ever see a context.Context.
+func LoggerFromContext(ctx context.Context) *slog.Logger {
+	if l, ok := ctx.Value(loggerCtxKey{}).(*slog.Logger); ok {
+		return l
+	}
+	return slog.Default()
+}
+```
+
+- [ ] **Langkah 9: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -run Logger -v`
+Hasil: PASS.
+
+- [ ] **Langkah 10: Tulis test recover yang gagal**
+
+Buat `internal/middleware/recover_test.go`:
+```go
+package middleware_test
+
+import (
+	"bytes"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/response"
+)
+
+func TestRecover_ConvertsPanicToInternal500(t *testing.T) {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return response.Error(c, middleware.RequestIDFromCtx(c), err)
+		},
+	})
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))))
+	app.Use(middleware.Recover())
+	app.Get("/x", func(c *fiber.Ctx) error {
+		panic("boom")
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestRecover_PassesThroughNormalRequests(t *testing.T) {
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))))
+	app.Use(middleware.Recover())
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(204) })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 204 {
+		t.Errorf("status = %d, want 204 (no panic, should pass through untouched)", resp.StatusCode)
+	}
+}
+```
+
+- [ ] **Langkah 11: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -run Recover -v`
+Hasil: FAIL — `middleware.Recover` belum ada.
+
+- [ ] **Langkah 12: Implementasikan recover.go**
+
+Buat `internal/middleware/recover.go`:
+```go
+package middleware
+
+import (
+	"fmt"
+	"runtime/debug"
+
+	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/apperror"
+)
+
+// Recover converts a panic anywhere downstream into a normal
+// apperror.Internal error instead of crashing the process, logging the
+// stack trace server-side. The client only ever sees request_id —
+// response.Error never exposes panic detail.
+func Recover() fiber.Handler {
+	return func(c *fiber.Ctx) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				LoggerFromCtx(c).Error("panic recovered",
+					"panic", fmt.Sprint(r),
+					"stack", string(debug.Stack()),
+				)
+				err = apperror.Internal(fmt.Errorf("panic: %v", r))
+			}
+		}()
+		return c.Next()
+	}
+}
+```
+
+- [ ] **Langkah 13: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -run Recover -v`
+Hasil: PASS.
+
+- [ ] **Langkah 14: Tulis test CORS yang gagal**
+
+Buat `internal/middleware/cors_test.go`:
+```go
+package middleware_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/middleware"
+)
+
+func TestCORS_AllowsConfiguredOrigin(t *testing.T) {
+	app := fiber.New()
+	app.Use(middleware.CORS([]string{"http://localhost:5173"}))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the configured origin", got)
+	}
+}
+
+func TestCORS_RejectsUnconfiguredOrigin(t *testing.T) {
+	app := fiber.New()
+	app.Use(middleware.CORS([]string{"http://localhost:5173"}))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "http://evil.example.com")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got == "http://evil.example.com" {
+		t.Error("CORS allowed an unconfigured origin")
+	}
+}
+```
+
+- [ ] **Langkah 15: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -run CORS -v`
+Hasil: FAIL — `middleware.CORS` belum ada.
+
+- [ ] **Langkah 16: Implementasikan cors.go**
+
+Buat `internal/middleware/cors.go`:
+```go
+package middleware
+
+import (
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+)
+
+// CORS builds Fiber's CORS middleware from the configured allowed origins.
+// No wildcard — this API uses bearer tokens (AllowCredentials: true), and
+// browsers reject a wildcard origin combined with credentials outright.
+func CORS(allowedOrigins []string) fiber.Handler {
+	return cors.New(cors.Config{
+		AllowOrigins:     strings.Join(allowedOrigins, ","),
+		AllowHeaders:     "Content-Type,Authorization",
+		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+		AllowCredentials: true,
+	})
+}
+```
+
+- [ ] **Langkah 17: Jalankan semua test middleware, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -v`
+Hasil: PASS — semua 10 test di keempat berkas lolos.
+
+- [ ] **Langkah 18: Commit**
+
+```bash
+git add go.mod go.sum internal/middleware
+git commit -m "feat: request ID, structured request logging, panic recovery, CORS"
+```
+
+---
