@@ -6528,3 +6528,546 @@ git commit -m "feat: tenant auth (login/refresh/logout) with tenant_code resolut
 ```
 
 ---
+
+### Tugas 17: Modul tenant `user` — pola contoh
+
+Ini modul yang disalin setiap modul tenant-scoped di masa depan (`product`, `order`, apa pun yang dibutuhkan project yang lahir dari starter ini). Setiap konvensi yang ditetapkan starter ini didemonstrasikan di sini: `WithTenant` untuk setiap query, soft delete, kolom audit `*_by` dari `database.ActorFromContext`, whitelist sort pagination, dan bentuk handler → service → repository.
+
+**Berkas:**
+- Buat: `internal/modules/tenant/user/model.go`
+- Buat: `internal/modules/tenant/user/dto.go`
+- Buat: `internal/modules/tenant/user/repository.go`
+- Buat: `internal/modules/tenant/user/service.go`
+- Buat: `internal/modules/tenant/user/handler.go`
+- Test: `internal/modules/tenant/user/repository_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `user.User` (struct baris DB), `user.CreateRequest`, `user.UpdateRequest`, `user.View`
+  - `user.Sortable map[string]string` — template whitelist untuk setiap modul di masa depan.
+  - `user.NewRepository(db *database.DB) *Repository` dengan `Create/FindByID/List/Update/Delete`
+  - `user.NewService(repo *Repository) *Service` dengan `Create/Get/List/Update/Delete`
+  - `user.NewHandler(svc *Service) *Handler` dengan `Create/Get/List/Update/Delete` (`func(c *fiber.Ctx) error`), disambungkan ke rute di Tugas 18 di belakang `RequireTenant` + `RequirePermission`.
+
+- [ ] **Langkah 1: Tulis test repository yang gagal**
+
+Buat `internal/modules/tenant/user/repository_test.go`:
+```go
+package user_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/migration"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/testsupport"
+)
+
+func setupUserRepo(t *testing.T) (*tenantuser.Repository, context.Context) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	db := database.NewDB(pool)
+	ctx := database.WithTenantInfo(context.Background(), database.TenantInfo{TenantID: uuid.New(), SchemaName: schema})
+	ctx = database.WithActor(ctx, database.Actor{UserID: uuid.New(), Scope: "tenant"})
+	return tenantuser.NewRepository(db), ctx
+}
+
+func TestCreateAndFindByID(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+
+	u := tenantuser.User{ID: uuid.New(), Email: "a@example.com", PasswordHash: "hash", Name: "A", IsActive: true}
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.Email != "a@example.com" {
+		t.Errorf("Email = %q, want a@example.com", got.Email)
+	}
+}
+
+func TestCreate_DuplicateEmail_ReturnsConflict(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+
+	u1 := tenantuser.User{ID: uuid.New(), Email: "dup@example.com", PasswordHash: "hash", Name: "A", IsActive: true}
+	if err := repo.Create(ctx, u1); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	u2 := tenantuser.User{ID: uuid.New(), Email: "dup@example.com", PasswordHash: "hash", Name: "B", IsActive: true}
+	if err := repo.Create(ctx, u2); err == nil {
+		t.Fatal("second Create with duplicate email succeeded, want conflict")
+	}
+}
+
+func TestFindByID_NotFound(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+
+	if _, err := repo.FindByID(ctx, uuid.New()); err == nil {
+		t.Fatal("FindByID() for a nonexistent id succeeded, want not-found error")
+	}
+}
+
+func TestUpdate_ChangesNameAndIsActive(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+	u := tenantuser.User{ID: uuid.New(), Email: "u@example.com", PasswordHash: "hash", Name: "Old", IsActive: true}
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	newName := "New"
+	inactive := false
+	if err := repo.Update(ctx, u.ID, &newName, &inactive); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.Name != "New" || got.IsActive != false {
+		t.Errorf("got Name=%q IsActive=%v, want Name=New IsActive=false", got.Name, got.IsActive)
+	}
+}
+
+func TestDelete_SoftDeletesAndHidesFromFindAndList(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+	u := tenantuser.User{ID: uuid.New(), Email: "gone@example.com", PasswordHash: "hash", Name: "Gone", IsActive: true}
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := repo.Delete(ctx, u.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := repo.FindByID(ctx, u.ID); err == nil {
+		t.Error("FindByID() found a soft-deleted user")
+	}
+
+	users, total, err := repo.List(ctx, 20, 0, "created_at DESC")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, lu := range users {
+		if lu.ID == u.ID {
+			t.Error("List() returned a soft-deleted user")
+		}
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 (the only user was soft-deleted)", total)
+	}
+}
+
+func TestList_RespectsLimitAndOrder(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+	for i := 0; i < 3; i++ {
+		u := tenantuser.User{
+			ID: uuid.New(), Email: uuid.New().String() + "@example.com",
+			PasswordHash: "hash", Name: "User", IsActive: true,
+		}
+		if err := repo.Create(ctx, u); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	users, total, err := repo.List(ctx, 2, 0, "created_at DESC")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(users) != 2 {
+		t.Errorf("len(users) = %d, want 2 (limit)", len(users))
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/modules/tenant/user/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan model.go dan dto.go**
+
+Buat `internal/modules/tenant/user/model.go`:
+```go
+package user
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type User struct {
+	ID           uuid.UUID  `db:"id"`
+	Email        string     `db:"email"`
+	PasswordHash string     `db:"password_hash"`
+	Name         string     `db:"name"`
+	IsActive     bool       `db:"is_active"`
+	CreatedAt    time.Time  `db:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at"`
+	DeletedAt    *time.Time `db:"deleted_at"`
+}
+```
+
+Buat `internal/modules/tenant/user/dto.go`:
+```go
+package user
+
+type CreateRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8"`
+	Name     string `json:"name" validate:"required"`
+}
+
+type UpdateRequest struct {
+	Name     *string `json:"name"`
+	IsActive *bool   `json:"is_active"`
+}
+
+type View struct {
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	IsActive bool   `json:"is_active"`
+}
+
+func toView(u User) View {
+	return View{ID: u.ID.String(), Email: u.Email, Name: u.Name, IsActive: u.IsActive}
+}
+```
+
+- [ ] **Langkah 4: Implementasikan repository.go**
+
+Buat `internal/modules/tenant/user/repository.go`:
+```go
+package user
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
+)
+
+// Sortable is the whitelist of columns the list endpoint may sort by,
+// consumed through pagination.Params.OrderByClause — never the raw query
+// value. Copy this pattern for every new tenant-scoped module.
+var Sortable = map[string]string{
+	"created_at": "created_at",
+	"name":       "name",
+	"email":      "email",
+}
+
+type Repository struct {
+	db *database.DB
+}
+
+func NewRepository(db *database.DB) *Repository {
+	return &Repository{db: db}
+}
+
+func wrapDBErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var appErr *apperror.Error
+	if errors.As(err, &appErr) {
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return apperror.NotFound("user tidak ditemukan")
+	}
+	return apperror.Internal(err)
+}
+
+func (r *Repository) Create(ctx context.Context, u User) error {
+	actor, _ := database.ActorFromContext(ctx)
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO users (id, email, password_hash, name, is_active, created_by) VALUES ($1, $2, $3, $4, $5, $6)`,
+			u.ID, u.Email, u.PasswordHash, u.Name, u.IsActive, actor.UserID)
+		return err
+	})
+	if err != nil {
+		// A duplicate email is by far the most likely failure here, and
+		// the unique partial index makes it unambiguous — reported as a
+		// conflict rather than a generic 500.
+		return apperror.Conflict("email sudah dipakai")
+	}
+	return nil
+}
+
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
+	var u User
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		return tx.Get(&u, `SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL`, id)
+	})
+	if err != nil {
+		return User{}, wrapDBErr(err)
+	}
+	return u, nil
+}
+
+func (r *Repository) List(ctx context.Context, limit, offset int, orderBy string) ([]User, int, error) {
+	var users []User
+	var total int
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		query := `SELECT * FROM users WHERE deleted_at IS NULL ORDER BY ` + orderBy + ` LIMIT $1 OFFSET $2`
+		if err := tx.Select(&users, query, limit, offset); err != nil {
+			return err
+		}
+		return tx.Get(&total, `SELECT count(*) FROM users WHERE deleted_at IS NULL`)
+	})
+	if err != nil {
+		return nil, 0, wrapDBErr(err)
+	}
+	return users, total, nil
+}
+
+func (r *Repository) Update(ctx context.Context, id uuid.UUID, name *string, isActive *bool) error {
+	actor, _ := database.ActorFromContext(ctx)
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE users SET name = COALESCE($2, name), is_active = COALESCE($3, is_active), updated_by = $4
+			 WHERE id = $1 AND deleted_at IS NULL`,
+			id, name, isActive, actor.UserID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return apperror.NotFound("user tidak ditemukan")
+		}
+		return nil
+	})
+	return wrapDBErr(err)
+}
+
+func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
+	actor, _ := database.ActorFromContext(ctx)
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE users SET deleted_at = now(), deleted_by = $2 WHERE id = $1 AND deleted_at IS NULL`,
+			id, actor.UserID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return apperror.NotFound("user tidak ditemukan")
+		}
+		return nil
+	})
+	return wrapDBErr(err)
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/modules/tenant/user/... -v`
+Hasil: PASS — keenam test lolos.
+
+- [ ] **Langkah 6: Implementasikan service.go**
+
+Buat `internal/modules/tenant/user/service.go`:
+```go
+package user
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/pagination"
+	"go-api-starter/internal/response"
+)
+
+type Service struct {
+	repo *Repository
+}
+
+func NewService(repo *Repository) *Service {
+	return &Service{repo: repo}
+}
+
+func (s *Service) Create(ctx context.Context, req CreateRequest) (View, error) {
+	if err := appauth.ValidatePasswordStrength(req.Password); err != nil {
+		return View{}, err
+	}
+	hash, err := appauth.HashPassword(req.Password)
+	if err != nil {
+		return View{}, err
+	}
+	u := User{ID: uuid.New(), Email: req.Email, PasswordHash: hash, Name: req.Name, IsActive: true}
+	if err := s.repo.Create(ctx, u); err != nil {
+		return View{}, err
+	}
+	return toView(u), nil
+}
+
+func (s *Service) Get(ctx context.Context, id uuid.UUID) (View, error) {
+	u, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return View{}, err
+	}
+	return toView(u), nil
+}
+
+func (s *Service) List(ctx context.Context, p pagination.Params) ([]View, response.Meta, error) {
+	users, total, err := s.repo.List(ctx, p.Limit, p.Offset(), p.OrderByClause(Sortable))
+	if err != nil {
+		return nil, response.Meta{}, err
+	}
+	views := make([]View, len(users))
+	for i, u := range users {
+		views[i] = toView(u)
+	}
+	return views, pagination.BuildMeta(p.Page, p.Limit, total), nil
+}
+
+func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) error {
+	return s.repo.Update(ctx, id, req.Name, req.IsActive)
+}
+
+func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repo.Delete(ctx, id)
+}
+```
+
+- [ ] **Langkah 7: Implementasikan handler.go**
+
+Buat `internal/modules/tenant/user/handler.go`:
+```go
+package user
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/pagination"
+	"go-api-starter/internal/response"
+	"go-api-starter/internal/validator"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+func (h *Handler) Create(c *fiber.Ctx) error {
+	var req CreateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c),
+			apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	view, err := h.svc.Create(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 201, view)
+}
+
+func (h *Handler) Get(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), apperror.NotFound("user tidak ditemukan"))
+	}
+
+	view, err := h.svc.Get(c.UserContext(), id)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, view)
+}
+
+func (h *Handler) List(c *fiber.Ctx) error {
+	params, verr := pagination.Parse(c, Sortable, "created_at")
+	if verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	views, meta, err := h.svc.List(c.UserContext(), params)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.SuccessList(c, 200, views, meta)
+}
+
+func (h *Handler) Update(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), apperror.NotFound("user tidak ditemukan"))
+	}
+
+	var req UpdateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c),
+			apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+	}
+
+	if err := h.svc.Update(c.UserContext(), id, req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil diperbarui"})
+}
+
+func (h *Handler) Delete(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), apperror.NotFound("user tidak ditemukan"))
+	}
+
+	if err := h.svc.Delete(c.UserContext(), id); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil dihapus"})
+}
+```
+
+- [ ] **Langkah 8: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 9: Commit**
+
+```bash
+git add internal/modules/tenant/user
+git commit -m "feat: tenant user module — the example CRUD pattern for future modules"
+```
+
+---
