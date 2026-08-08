@@ -5593,3 +5593,445 @@ git commit -m "feat: tenant provisioning service, lifecycle management, and cli 
 ```
 
 ---
+
+### Tugas 15: RBAC — middleware `RequirePermission`, cache permission, service role tenant
+
+Dua bagian, pembagian sama seperti Tugas 11: `middleware.PermissionChecker` dideklarasikan di sisi konsumen (`internal/middleware`); `modules/tenant/role` mengimplementasikannya terhadap tabel tenant sungguhan. Di sinilah paket `modules/tenant/role` dari Struktur Berkas dibangun — bukan tugas terpisah karena satu-satunya tugasnya adalah menjadi implementasi interface ini.
+
+**Berkas:**
+- Buat: `internal/middleware/rbac.go`
+- Buat: `internal/modules/tenant/role/service.go`
+- Test: `internal/middleware/rbac_test.go`
+- Test: `internal/modules/tenant/role/service_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `middleware.PermissionChecker interface { HasPermission(ctx, userID uuid.UUID, permCode string) (bool, error) }`
+  - `middleware.NewPermissionCache(checker PermissionChecker, ttl time.Duration) *PermissionCache`
+  - `(c *PermissionCache) HasPermission(ctx, tenantID, userID uuid.UUID, permCode string) (bool, error)`
+  - `middleware.RequirePermission(permCode string, cache *PermissionCache) fiber.Handler` — harus dijalankan setelah `RequireTenant`.
+  - `role.NewService(db *database.DB) *Service` — **mengimplementasikan `middleware.PermissionChecker`**.
+
+- [ ] **Langkah 1: Tulis test middleware RBAC yang gagal**
+
+Buat `internal/middleware/rbac_test.go`:
+```go
+package middleware_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/middleware"
+)
+
+type fakePermissionChecker struct {
+	calls   int32
+	allowed bool
+	err     error
+}
+
+func (f *fakePermissionChecker) HasPermission(ctx context.Context, userID uuid.UUID, permCode string) (bool, error) {
+	atomic.AddInt32(&f.calls, 1)
+	return f.allowed, f.err
+}
+
+func TestPermissionCache_CachesWithinTTL(t *testing.T) {
+	fake := &fakePermissionChecker{allowed: true}
+	cache := middleware.NewPermissionCache(fake, time.Minute)
+	tenantID, userID := uuid.New(), uuid.New()
+
+	for i := 0; i < 3; i++ {
+		if _, err := cache.HasPermission(context.Background(), tenantID, userID, "user.view"); err != nil {
+			t.Fatalf("HasPermission: %v", err)
+		}
+	}
+	if fake.calls != 1 {
+		t.Errorf("checker called %d times, want 1 (should be cached)", fake.calls)
+	}
+}
+
+func TestPermissionCache_DifferentPermissionsAreIndependent(t *testing.T) {
+	fake := &fakePermissionChecker{allowed: true}
+	cache := middleware.NewPermissionCache(fake, time.Minute)
+	tenantID, userID := uuid.New(), uuid.New()
+
+	cache.HasPermission(context.Background(), tenantID, userID, "user.view")
+	cache.HasPermission(context.Background(), tenantID, userID, "user.create")
+
+	if fake.calls != 2 {
+		t.Errorf("checker called %d times, want 2 (different permissions must not share a cache slot)", fake.calls)
+	}
+}
+
+func TestRequirePermission_AllowsWhenPermitted(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	tenantID := uuid.New()
+	token, _ := tm.IssueAccessToken(uuid.New(), auth.ScopeTenant, &tenantID)
+
+	tenantFake := &fakeTenantLookup{record: middleware.TenantRecord{
+		TenantID: tenantID, SchemaName: "acme_corp", Status: "active", SchemaVersion: 4,
+	}}
+	resolver := middleware.NewTenantResolver(tenantFake, time.Minute)
+	permCache := middleware.NewPermissionCache(&fakePermissionChecker{allowed: true}, time.Minute)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequireTenant(tm, resolver))
+	app.Get("/x", middleware.RequirePermission("user.view", permCache), func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRequirePermission_RejectsWhenNotPermitted(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	tenantID := uuid.New()
+	token, _ := tm.IssueAccessToken(uuid.New(), auth.ScopeTenant, &tenantID)
+
+	tenantFake := &fakeTenantLookup{record: middleware.TenantRecord{
+		TenantID: tenantID, SchemaName: "acme_corp", Status: "active", SchemaVersion: 4,
+	}}
+	resolver := middleware.NewTenantResolver(tenantFake, time.Minute)
+	permCache := middleware.NewPermissionCache(&fakePermissionChecker{allowed: false}, time.Minute)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequireTenant(tm, resolver))
+	app.Get("/x", middleware.RequirePermission("user.delete", permCache), func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Error("RequirePermission allowed a request the checker denied")
+	}
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -run "PermissionCache|RequirePermission" -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan rbac.go**
+
+Buat `internal/middleware/rbac.go`:
+```go
+package middleware
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
+)
+
+// PermissionChecker is implemented by the tenant role service
+// (modules/tenant/role, this task). Declared here, consumer-side, so this
+// package never imports modules/tenant/role.
+type PermissionChecker interface {
+	HasPermission(ctx context.Context, userID uuid.UUID, permCode string) (bool, error)
+}
+
+type permCacheKey struct {
+	tenantID uuid.UUID
+	userID   uuid.UUID
+	perm     string
+}
+
+type permCacheEntry struct {
+	allowed bool
+	expires time.Time
+}
+
+// PermissionCache wraps a PermissionChecker with a short TTL cache keyed
+// by (tenant, user, permission) — same "asumsi single instance" caveat as
+// TenantResolver (Task 11): a revoked permission is only guaranteed to
+// take effect on this instance after ttl elapses.
+type PermissionCache struct {
+	checker PermissionChecker
+	ttl     time.Duration
+	mu      sync.RWMutex
+	cache   map[permCacheKey]permCacheEntry
+}
+
+func NewPermissionCache(checker PermissionChecker, ttl time.Duration) *PermissionCache {
+	return &PermissionCache{checker: checker, ttl: ttl, cache: make(map[permCacheKey]permCacheEntry)}
+}
+
+func (c *PermissionCache) HasPermission(ctx context.Context, tenantID, userID uuid.UUID, permCode string) (bool, error) {
+	key := permCacheKey{tenantID: tenantID, userID: userID, perm: permCode}
+
+	c.mu.RLock()
+	entry, ok := c.cache[key]
+	c.mu.RUnlock()
+	if ok && time.Now().Before(entry.expires) {
+		return entry.allowed, nil
+	}
+
+	allowed, err := c.checker.HasPermission(ctx, userID, permCode)
+	if err != nil {
+		return false, err
+	}
+
+	c.mu.Lock()
+	c.cache[key] = permCacheEntry{allowed: allowed, expires: time.Now().Add(c.ttl)}
+	c.mu.Unlock()
+	return allowed, nil
+}
+
+// RequirePermission rejects the request unless the authenticated tenant
+// user holds permCode. It must run after RequireTenant — it reads the
+// tenant and actor info that only RequireTenant sets in the context.
+func RequirePermission(permCode string, cache *PermissionCache) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		actor, ok := database.ActorFromContext(c.UserContext())
+		if !ok {
+			return apperror.Unauthorized("tidak terautentikasi")
+		}
+		tenant, ok := database.TenantFromContext(c.UserContext())
+		if !ok {
+			return apperror.Internal(fmt.Errorf("RequirePermission used without RequireTenant"))
+		}
+
+		allowed, err := cache.HasPermission(c.UserContext(), tenant.TenantID, actor.UserID, permCode)
+		if err != nil {
+			return apperror.Internal(err)
+		}
+		if !allowed {
+			return apperror.Forbidden("tidak punya izin untuk aksi ini")
+		}
+		return c.Next()
+	}
+}
+```
+
+- [ ] **Langkah 4: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -run "PermissionCache|RequirePermission" -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 5: Tulis test role service yang gagal**
+
+Buat `internal/modules/tenant/role/service_test.go`:
+```go
+package role_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/migration"
+	"go-api-starter/internal/modules/tenant/role"
+	"go-api-starter/internal/permission"
+	"go-api-starter/internal/testsupport"
+)
+
+func setupRoleService(t *testing.T) (*role.Service, database.TenantInfo, *sqlx.DB) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+	if _, err := permission.Sync(context.Background(), pool.DB, schema); err != nil {
+		t.Fatalf("permission.Sync: %v", err)
+	}
+
+	tenantInfo := database.TenantInfo{TenantID: uuid.New(), SchemaName: schema}
+	return role.NewService(database.NewDB(pool)), tenantInfo, pool
+}
+
+// seedInSchema runs a fixture-setup query with search_path pinned to
+// schema — tests seed rows directly rather than going through
+// database.WithTenant themselves.
+func seedInSchema(t *testing.T, pool *sqlx.DB, schema, query string, args ...any) {
+	t.Helper()
+	tx, err := pool.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL search_path TO "` + schema + `"`); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
+		t.Fatalf("seed query: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+func TestHasPermission_OwnerBypass_AlwaysAllowed(t *testing.T) {
+	svc, tenantInfo, pool := setupRoleService(t)
+	ctx := database.WithTenantInfo(context.Background(), tenantInfo)
+
+	userID, roleID := uuid.New(), uuid.New()
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, 'owner@x.com', 'hash', 'Owner', true)`, userID)
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO roles (id, name, is_system) VALUES ($1, 'owner', true)`, roleID)
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, userID, roleID)
+
+	allowed, err := svc.HasPermission(ctx, userID, "some.permission.never.seeded")
+	if err != nil {
+		t.Fatalf("HasPermission: %v", err)
+	}
+	if !allowed {
+		t.Error("owner (is_system role) was denied a permission it should bypass-allow")
+	}
+}
+
+func TestHasPermission_NonOwner_RequiresExplicitGrant(t *testing.T) {
+	svc, tenantInfo, pool := setupRoleService(t)
+	ctx := database.WithTenantInfo(context.Background(), tenantInfo)
+
+	userID, roleID := uuid.New(), uuid.New()
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, 'staff@x.com', 'hash', 'Staff', true)`, userID)
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO roles (id, name, is_system) VALUES ($1, 'staff', false)`, roleID)
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, userID, roleID)
+
+	allowed, err := svc.HasPermission(ctx, userID, permission.UserView)
+	if err != nil {
+		t.Fatalf("HasPermission: %v", err)
+	}
+	if allowed {
+		t.Error("non-owner role with no granted permission was allowed")
+	}
+
+	var permID uuid.UUID
+	if err := pool.Get(&permID, `SELECT id FROM `+tenantInfo.SchemaName+`.permissions WHERE code = $1`, permission.UserView); err != nil {
+		t.Fatalf("find permission id: %v", err)
+	}
+	seedInSchema(t, pool, tenantInfo.SchemaName,
+		`INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)`, roleID, permID)
+
+	allowed, err = svc.HasPermission(ctx, userID, permission.UserView)
+	if err != nil {
+		t.Fatalf("HasPermission (after grant): %v", err)
+	}
+	if !allowed {
+		t.Error("non-owner role was denied a permission explicitly granted to it")
+	}
+}
+```
+
+- [ ] **Langkah 6: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/modules/tenant/role/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 7: Implementasikan service.go**
+
+Buat `internal/modules/tenant/role/service.go`:
+```go
+package role
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
+)
+
+type Service struct {
+	db *database.DB
+}
+
+func NewService(db *database.DB) *Service {
+	return &Service{db: db}
+}
+
+// HasPermission implements middleware.PermissionChecker. A user holding a
+// role with is_system=true (currently only "owner") is granted every
+// permission via this bypass, rather than rows in role_permissions, so a
+// newly added permission is automatically available to owners without a
+// backfill migration.
+func (s *Service) HasPermission(ctx context.Context, userID uuid.UUID, permCode string) (bool, error) {
+	var allowed bool
+	err := s.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		var isSystemOwner bool
+		if err := tx.Get(&isSystemOwner, `
+			SELECT EXISTS (
+				SELECT 1 FROM user_roles ur
+				JOIN roles r ON r.id = ur.role_id
+				WHERE ur.user_id = $1 AND r.is_system = true
+			)`, userID); err != nil {
+			return err
+		}
+		if isSystemOwner {
+			allowed = true
+			return nil
+		}
+
+		return tx.Get(&allowed, `
+			SELECT EXISTS (
+				SELECT 1 FROM user_roles ur
+				JOIN role_permissions rp ON rp.role_id = ur.role_id
+				JOIN permissions p ON p.id = rp.permission_id
+				WHERE ur.user_id = $1 AND p.code = $2
+			)`, userID, permCode)
+	})
+	if err != nil {
+		return false, apperror.Internal(err)
+	}
+	return allowed, nil
+}
+```
+
+- [ ] **Langkah 8: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/modules/tenant/role/... -v`
+Hasil: PASS — kedua test lolos.
+
+- [ ] **Langkah 9: Commit**
+
+```bash
+git add internal/middleware internal/modules/tenant/role
+git commit -m "feat: RBAC middleware with permission cache and tenant role service"
+```
+
+---
