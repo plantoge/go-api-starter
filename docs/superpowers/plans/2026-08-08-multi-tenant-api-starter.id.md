@@ -4545,3 +4545,265 @@ git commit -m "feat: platform admin auth (login/refresh/logout) and bootstrap CL
 ```
 
 ---
+
+### Tugas 13: Konstanta permission + mekanisme sync + CLI
+
+Dibangun sebelum provisioning tenant (tugas berikutnya) karena provisioning butuh `permission.All` untuk mengisi tabel `permissions` tenant yang baru dibuat.
+
+**Berkas:**
+- Buat: `internal/permission/constants.go`
+- Buat: `internal/permission/sync.go`
+- Buat: `cmd/cli/commands/permission.go`
+- Test: `internal/permission/sync_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `permission.UserView`, `UserCreate`, `UserUpdate`, `UserDelete`, `RoleView`, `RoleManage` (konstanta string)
+  - `permission.All []string` — semua konstanta di atas; sumber kebenaran yang jadi dasar provisioning Tugas 14.
+  - `permission.Sync(ctx context.Context, db *sql.DB, schemaName string) (added int, err error)`
+  - Perintah CLI: `cli permission sync --all` / `--tenant=<code>`
+
+- [ ] **Langkah 1: Tulis test yang gagal**
+
+Buat `internal/permission/sync_test.go`:
+```go
+package permission_test
+
+import (
+	"context"
+	"testing"
+
+	"go-api-starter/internal/migration"
+	"go-api-starter/internal/permission"
+	"go-api-starter/internal/testsupport"
+)
+
+func TestSync_SeedsAllPermissions(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	added, err := permission.Sync(context.Background(), pool.DB, schema)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if added != len(permission.All) {
+		t.Errorf("added = %d, want %d", added, len(permission.All))
+	}
+
+	var count int
+	if err := pool.Get(&count, "SELECT count(*) FROM "+schema+".permissions"); err != nil {
+		t.Fatalf("count permissions: %v", err)
+	}
+	if count != len(permission.All) {
+		t.Errorf("permissions table has %d rows, want %d", count, len(permission.All))
+	}
+}
+
+func TestSync_IsIdempotent(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	if _, err := permission.Sync(context.Background(), pool.DB, schema); err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+	added, err := permission.Sync(context.Background(), pool.DB, schema)
+	if err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if added != 0 {
+		t.Errorf("second Sync added %d permissions, want 0 (already synced)", added)
+	}
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/permission/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan constants.go**
+
+Buat `internal/permission/constants.go`:
+```go
+package permission
+
+const (
+	UserView   = "user.view"
+	UserCreate = "user.create"
+	UserUpdate = "user.update"
+	UserDelete = "user.delete"
+
+	RoleView   = "role.view"
+	RoleManage = "role.manage"
+)
+
+// All lists every permission constant above. Tenant provisioning (Task 14)
+// seeds each of these into a brand new tenant's permissions table; Sync
+// (sync.go) brings already-provisioned tenants up to date when a new
+// constant is added later.
+var All = []string{
+	UserView, UserCreate, UserUpdate, UserDelete,
+	RoleView, RoleManage,
+}
+```
+
+- [ ] **Langkah 4: Implementasikan sync.go**
+
+Buat `internal/permission/sync.go`:
+```go
+package permission
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
+)
+
+// Sync inserts any permission in All that schemaName's permissions table
+// doesn't already have, and reports how many were added. Idempotent — safe
+// to run against every tenant on every deploy — because permission
+// constants live in Go code, not in migration files, so a newly added
+// constant needs an explicit push to reach tenants provisioned before it
+// existed.
+func Sync(ctx context.Context, db *sql.DB, schemaName string) (added int, err error) {
+	if !database.ValidSchemaName(schemaName) {
+		return 0, apperror.Internal(fmt.Errorf("invalid schema name %q", schemaName))
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, apperror.Internal(err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `SET LOCAL search_path TO "`+schemaName+`"`); err != nil {
+		return 0, apperror.Internal(err)
+	}
+
+	existing := map[string]bool{}
+	rows, err := tx.QueryContext(ctx, `SELECT code FROM permissions`)
+	if err != nil {
+		return 0, apperror.Internal(err)
+	}
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			rows.Close()
+			return 0, apperror.Internal(err)
+		}
+		existing[code] = true
+	}
+	rows.Close()
+
+	for _, code := range All {
+		if existing[code] {
+			continue
+		}
+		group := strings.SplitN(code, ".", 2)[0]
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO permissions (id, code, "group") VALUES ($1, $2, $3)`,
+			uuid.New(), code, group); err != nil {
+			return added, apperror.Internal(err)
+		}
+		added++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, apperror.Internal(err)
+	}
+	return added, nil
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/permission/... -v`
+Hasil: PASS — kedua test lolos.
+
+- [ ] **Langkah 6: Tulis perintah CLI**
+
+Buat `cmd/cli/commands/permission.go`:
+```go
+package commands
+
+import (
+	"context"
+	"flag"
+	"fmt"
+
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/permission"
+)
+
+func init() {
+	Register("permission sync", cmdPermissionSync)
+}
+
+func cmdPermissionSync(args []string) error {
+	fs := flag.NewFlagSet("permission sync", flag.ExitOnError)
+	all := fs.Bool("all", false, "sync every tenant")
+	tenantCode := fs.String("tenant", "", "sync a single tenant by code")
+	fs.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	targets, err := tenantSchemasToMigrate(db, *all, *tenantCode) // shared helper from migrate.go
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no matching tenants found")
+	}
+
+	for _, tgt := range targets {
+		added, err := permission.Sync(context.Background(), db, tgt.schemaName)
+		if err != nil {
+			return fmt.Errorf("tenant %s: %w", tgt.code, err)
+		}
+		fmt.Printf("%-20s +%d permission(s)\n", tgt.code, added)
+	}
+	return nil
+}
+```
+
+- [ ] **Langkah 7: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 8: Commit**
+
+```bash
+git add internal/permission cmd/cli/commands/permission.go
+git commit -m "feat: permission constants and cli permission sync command"
+```
+
+---
