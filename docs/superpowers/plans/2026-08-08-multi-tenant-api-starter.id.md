@@ -7379,3 +7379,113 @@ git commit -m "feat: HTTP server wiring — router, health checks, graceful shut
 ```
 
 ---
+
+### Tugas 19: Perintah `cli cleanup`
+
+Menghapus refresh token yang kedaluwarsa/dicabut (platform dan setiap schema tenant) dan baris `login_attempts` yang lama (khusus platform — schema tenant tidak pernah punya tabel `login_attempts` sendiri; spec menjaga riwayat rate-limit di satu tempat saja, tidak peduli scope-nya). Dimaksudkan untuk dijalankan terjadwal lewat systemd timer (disambungkan di Tugas 21). Jendela pengaman 30-hari milik tenant purge sudah dibangun di `Service.Purge` (Tugas 14) — tidak ada yang perlu ditambahkan di sana.
+
+Tidak ada test otomatis untuk berkas ini, konsisten dengan berkas perintah CLI lain di rencana ini (`migrate.go`, `admin.go`, `tenant.go`, `permission.go`) — kebenarannya bergantung pada service di baliknya yang sudah teruji; tugas ini diverifikasi manual.
+
+**Berkas:**
+- Buat: `cmd/cli/commands/cleanup.go`
+
+**Antarmuka:**
+- Menghasilkan: perintah CLI `cli cleanup`
+
+- [ ] **Langkah 1: Implementasikan cleanup.go**
+
+Buat `cmd/cli/commands/cleanup.go`:
+```go
+package commands
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/database"
+)
+
+func init() {
+	Register("cleanup", cmdCleanup)
+}
+
+const loginAttemptRetention = 30 * 24 * time.Hour
+
+func cmdCleanup(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`DELETE FROM platform.refresh_tokens WHERE revoked_at IS NOT NULL OR expires_at < now()`); err != nil {
+		return fmt.Errorf("clean platform refresh_tokens: %w", err)
+	}
+	cutoff := time.Now().Add(-loginAttemptRetention)
+	if _, err := db.Exec(`DELETE FROM platform.login_attempts WHERE attempted_at < $1`, cutoff); err != nil {
+		return fmt.Errorf("clean platform login_attempts: %w", err)
+	}
+	fmt.Println("platform: dibersihkan")
+
+	targets, err := tenantSchemasToMigrate(db, true, "") // shared helper from migrate.go
+	if err != nil {
+		return err
+	}
+	for _, tgt := range targets {
+		if err := cleanupTenantSchema(db, tgt.schemaName); err != nil {
+			return fmt.Errorf("tenant %s: %w", tgt.code, err)
+		}
+		fmt.Printf("%-20s dibersihkan\n", tgt.code)
+	}
+	return nil
+}
+
+func cleanupTenantSchema(db *sql.DB, schemaName string) error {
+	if !database.ValidSchemaName(schemaName) {
+		return fmt.Errorf("invalid schema name %q", schemaName)
+	}
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`SET LOCAL search_path TO "` + schemaName + `"`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM refresh_tokens WHERE revoked_at IS NOT NULL OR expires_at < now()`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+```
+
+- [ ] **Langkah 2: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 3: Verifikasi manual**
+
+Jalankan:
+```bash
+go run ./cmd/cli cleanup
+```
+Hasil: mencetak `platform: dibersihkan` diikuti satu baris per tenant. Menjalankannya terhadap tenant yang baru saja di-provisioning dan belum punya token kedaluwarsa itu no-op — itu memang wajar, bukan bug.
+
+- [ ] **Langkah 4: Commit**
+
+```bash
+git add cmd/cli/commands/cleanup.go
+git commit -m "feat: cli cleanup command for expired refresh tokens and login attempts"
+```
+
+---
