@@ -1226,3 +1226,407 @@ git commit -m "feat: request validation and whitelist-safe pagination"
 ```
 
 ---
+
+### Tugas 5: Database — connection pool, `WithTenant`, context helper
+
+Ini bagian paling krusial dari seluruh starter dari sisi keamanan: inilah yang mengubah "satu database Postgres" menjadi "schema per-tenant yang terisolasi ketat." Pastikan test tugas ini hijau dulu sebelum membangun apa pun di atasnya.
+
+**Berkas:**
+- Buat: `internal/database/postgres.go`
+- Buat: `internal/database/tenant.go`
+- Buat: `internal/testsupport/testsupport.go` (paket helper khusus test — **tidak pernah** di-import dari kode non-test; dia menarik `testing`)
+- Test: `internal/database/tenant_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `database.NewPool(cfg config.DBConfig) (*sqlx.DB, error)` — pool umum, search_path dibiarkan default koneksi.
+  - `database.NewPlatformPool(cfg config.DBConfig) (*sqlx.DB, error)` — pool yang di-pin ke `search_path=platform` di setiap koneksi.
+  - Struct `database.TenantInfo { TenantID uuid.UUID; SchemaName string }`
+  - Struct `database.Actor { UserID uuid.UUID; Scope string }`
+  - `database.WithTenantInfo(ctx, TenantInfo) context.Context`, `database.TenantFromContext(ctx) (TenantInfo, bool)`
+  - `database.WithActor(ctx, Actor) context.Context`, `database.ActorFromContext(ctx) (Actor, bool)`
+  - `database.ValidSchemaName(name string) bool`
+  - Struct `database.DB { Pool *sqlx.DB }`, `database.NewDB(pool *sqlx.DB) *DB`
+  - `(db *DB) WithTenant(ctx context.Context, fn func(tx *sqlx.Tx) error) error`
+  - `testsupport.OpenTestDB(t *testing.T) *sqlx.DB` — skip test kalau PostgreSQL lokal tidak bisa diakses.
+  - `testsupport.RandomSchemaName() string`
+
+- [ ] **Langkah 1: Tambah dependency**
+
+Jalankan:
+```bash
+go get github.com/jmoiron/sqlx@latest
+go get github.com/jackc/pgx/v5@latest
+go get github.com/google/uuid@latest
+```
+
+- [ ] **Langkah 2: Buat database khusus test `app_test`**
+
+Jalankan (sekali, manual, di PostgreSQL lokal kamu):
+```bash
+psql -U postgres -c "CREATE DATABASE app_test OWNER app;"
+```
+(Sesuaikan nama role dengan `DB_USER` di `.env.test`. Kalau role `app` belum ada: `psql -U postgres -c "CREATE ROLE app LOGIN PASSWORD 'changeme';"` dulu, samakan dengan `.env.test`.)
+
+Salin `.env.test.example` jadi `.env.test` di root repo dan sesuaikan kredensialnya kalau perlu.
+
+- [ ] **Langkah 3: Tulis helper test support**
+
+Buat `internal/testsupport/testsupport.go`:
+```go
+// Package testsupport provides helpers for tests that need a real
+// PostgreSQL connection. It must only ever be imported from _test.go
+// files — it depends on "testing", which has no place in a shipped binary.
+package testsupport
+
+import (
+	"fmt"
+	"math/rand"
+	"os"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
+	"github.com/joho/godotenv"
+)
+
+// OpenTestDB connects to the app_test database described by .env.test at
+// the repo root. It skips (not fails) the calling test when no local
+// PostgreSQL is reachable, so `go test ./...` stays usable on a machine
+// that hasn't set one up — the machine that has gets full coverage.
+func OpenTestDB(t *testing.T) *sqlx.DB {
+	t.Helper()
+	_ = godotenv.Load(findEnvTestFile())
+
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		getenv("DB_USER", "app"),
+		getenv("DB_PASSWORD", "changeme"),
+		getenv("DB_HOST", "localhost"),
+		getenv("DB_PORT", "5432"),
+		getenv("DB_NAME", "app_test"),
+		getenv("DB_SSLMODE", "disable"),
+	)
+
+	db, err := sqlx.Connect("pgx", dsn)
+	if err != nil {
+		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// RandomSchemaName returns a name like "test_a1b2c3d4" that satisfies the
+// tenant schema-name regex, for tests that need their own throwaway schema.
+func RandomSchemaName() string {
+	src := rand.New(rand.NewSource(time.Now().UnixNano()))
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 8)
+	for i := range b {
+		b[i] = letters[src.Intn(len(letters))]
+	}
+	return "test_" + string(b)
+}
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func findEnvTestFile() string {
+	candidates := []string{".env.test", "../../.env.test", "../../../.env.test"}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ".env.test"
+}
+```
+
+- [ ] **Langkah 4: Tulis test yang gagal**
+
+Buat `internal/database/tenant_test.go`:
+```go
+package database_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/testsupport"
+)
+
+func createTestSchema(t *testing.T, pool *sqlx.DB, name string) {
+	t.Helper()
+	if _, err := pool.Exec("CREATE SCHEMA " + name); err != nil {
+		t.Fatalf("create schema %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		pool.Exec("DROP SCHEMA " + name + " CASCADE")
+	})
+	if _, err := pool.Exec("CREATE TABLE " + name + ".widgets (id serial primary key, name text)"); err != nil {
+		t.Fatalf("create table in %s: %v", name, err)
+	}
+}
+
+func TestWithTenant_IsolatesSchemas(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	db := database.NewDB(pool)
+
+	schemaA := testsupport.RandomSchemaName()
+	schemaB := testsupport.RandomSchemaName()
+	createTestSchema(t, pool, schemaA)
+	createTestSchema(t, pool, schemaB)
+
+	ctxA := database.WithTenantInfo(context.Background(), database.TenantInfo{
+		TenantID: uuid.New(), SchemaName: schemaA,
+	})
+	ctxB := database.WithTenantInfo(context.Background(), database.TenantInfo{
+		TenantID: uuid.New(), SchemaName: schemaB,
+	})
+
+	err := db.WithTenant(ctxA, func(tx *sqlx.Tx) error {
+		_, err := tx.Exec("INSERT INTO widgets (name) VALUES ($1)", "from-a")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert into schema A: %v", err)
+	}
+
+	err = db.WithTenant(ctxB, func(tx *sqlx.Tx) error {
+		var count int
+		if err := tx.Get(&count, "SELECT count(*) FROM widgets"); err != nil {
+			return err
+		}
+		if count != 0 {
+			t.Errorf("schema B sees %d row(s), want 0 — schema A's insert leaked across search_path", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("query schema B: %v", err)
+	}
+}
+
+func TestWithTenant_RollbackClearsSearchPath(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	pool.SetMaxOpenConns(1) // force both calls below onto the same physical connection
+	db := database.NewDB(pool)
+
+	schemaA := testsupport.RandomSchemaName()
+	schemaB := testsupport.RandomSchemaName()
+	createTestSchema(t, pool, schemaA)
+	createTestSchema(t, pool, schemaB)
+
+	ctxA := database.WithTenantInfo(context.Background(), database.TenantInfo{
+		TenantID: uuid.New(), SchemaName: schemaA,
+	})
+	_ = db.WithTenant(ctxA, func(tx *sqlx.Tx) error {
+		return errors.New("forced failure")
+	})
+
+	ctxB := database.WithTenantInfo(context.Background(), database.TenantInfo{
+		TenantID: uuid.New(), SchemaName: schemaB,
+	})
+	var current string
+	err := db.WithTenant(ctxB, func(tx *sqlx.Tx) error {
+		return tx.Get(&current, "SELECT current_schema()")
+	})
+	if err != nil {
+		t.Fatalf("WithTenant(schemaB): %v", err)
+	}
+	if current != schemaB {
+		t.Errorf("current_schema() = %q, want %q — search_path leaked across a rolled-back transaction on a reused connection", current, schemaB)
+	}
+}
+
+func TestWithTenant_NoTenantInContext_ReturnsError(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	db := database.NewDB(pool)
+
+	err := db.WithTenant(context.Background(), func(tx *sqlx.Tx) error {
+		t.Fatal("fn should not run without tenant context")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("WithTenant() = nil, want error when context has no TenantInfo")
+	}
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/database/... -v`
+Hasil: FAIL — paket tidak compile (`database.NewDB` dkk. belum ada).
+
+- [ ] **Langkah 6: Implementasikan postgres.go**
+
+Buat `internal/database/postgres.go`:
+```go
+package database
+
+import (
+	"fmt"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
+	"go-api-starter/internal/config"
+)
+
+// NewPool opens the main application connection pool, used for tenant-
+// scoped queries via WithTenant. search_path is left at the connection
+// default; WithTenant pins it per-transaction.
+func NewPool(cfg config.DBConfig) (*sqlx.DB, error) {
+	db, err := sqlx.Connect("pgx", cfg.DSN())
+	if err != nil {
+		return nil, fmt.Errorf("connect to database: %w", err)
+	}
+	configurePool(db, cfg)
+	return db, nil
+}
+
+// NewPlatformPool opens a pool pinned to search_path=platform on every
+// connection, so platform repositories write unqualified table names
+// ("FROM tenants") and never need WithTenant.
+func NewPlatformPool(cfg config.DBConfig) (*sqlx.DB, error) {
+	db, err := sqlx.Connect("pgx", cfg.PlatformDSN())
+	if err != nil {
+		return nil, fmt.Errorf("connect to platform schema: %w", err)
+	}
+	configurePool(db, cfg)
+	return db, nil
+}
+
+func configurePool(db *sqlx.DB, cfg config.DBConfig) {
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+}
+```
+
+- [ ] **Langkah 7: Implementasikan tenant.go**
+
+Buat `internal/database/tenant.go`:
+```go
+package database
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"go-api-starter/internal/apperror"
+)
+
+var schemaNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{2,49}$`)
+
+// ValidSchemaName reports whether name is safe to interpolate into SQL as
+// an identifier. Checked once at provisioning time, and again here,
+// defensively, every time WithTenant is about to use it.
+func ValidSchemaName(name string) bool {
+	return schemaNameRe.MatchString(name)
+}
+
+// quoteIdentifier double-quotes a Postgres identifier, escaping embedded
+// quotes. A small local helper instead of a lib/pq dependency pulled in
+// only for QuoteIdentifier.
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+type TenantInfo struct {
+	TenantID   uuid.UUID
+	SchemaName string
+}
+
+type Actor struct {
+	UserID uuid.UUID
+	Scope  string // "platform" | "tenant"
+}
+
+type tenantCtxKey struct{}
+type actorCtxKey struct{}
+
+func WithTenantInfo(ctx context.Context, info TenantInfo) context.Context {
+	return context.WithValue(ctx, tenantCtxKey{}, info)
+}
+
+func TenantFromContext(ctx context.Context) (TenantInfo, bool) {
+	info, ok := ctx.Value(tenantCtxKey{}).(TenantInfo)
+	return info, ok
+}
+
+func WithActor(ctx context.Context, actor Actor) context.Context {
+	return context.WithValue(ctx, actorCtxKey{}, actor)
+}
+
+func ActorFromContext(ctx context.Context) (Actor, bool) {
+	actor, ok := ctx.Value(actorCtxKey{}).(Actor)
+	return actor, ok
+}
+
+type DB struct {
+	Pool *sqlx.DB
+}
+
+func NewDB(pool *sqlx.DB) *DB {
+	return &DB{Pool: pool}
+}
+
+// WithTenant runs fn inside a transaction whose search_path is pinned, via
+// SET LOCAL, to the schema of the tenant found in ctx. SET LOCAL only lasts
+// for the transaction — commit or rollback both clear it automatically —
+// so the connection always returns to the pool clean, with no manual reset
+// step that could be forgotten on an error path.
+func (db *DB) WithTenant(ctx context.Context, fn func(tx *sqlx.Tx) error) error {
+	info, ok := TenantFromContext(ctx)
+	if !ok {
+		return apperror.Internal(fmt.Errorf("WithTenant called without tenant context"))
+	}
+	if !ValidSchemaName(info.SchemaName) {
+		return apperror.Internal(fmt.Errorf("invalid schema name %q", info.SchemaName))
+	}
+
+	tx, err := db.Pool.BeginTxx(ctx, nil)
+	if err != nil {
+		return apperror.Internal(fmt.Errorf("begin tx: %w", err))
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+
+	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO "+quoteIdentifier(info.SchemaName)); err != nil {
+		return apperror.Internal(fmt.Errorf("set search_path: %w", err))
+	}
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return apperror.Internal(fmt.Errorf("commit tx: %w", err))
+	}
+	return nil
+}
+```
+
+- [ ] **Langkah 8: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/database/... -v`
+Hasil: PASS — `TestWithTenant_IsolatesSchemas`, `TestWithTenant_RollbackClearsSearchPath`, `TestWithTenant_NoTenantInContext_ReturnsError` semua lolos terhadap database `app_test` lokal kamu. (Kalau PostgreSQL tidak bisa diakses, hasilnya SKIP, bukan gagal — siapkan dulu sesuai Langkah 2 sebelum lanjut.)
+
+- [ ] **Langkah 9: Commit**
+
+```bash
+git add go.mod go.sum internal/database internal/testsupport
+git commit -m "feat: tenant-scoped DB pool with SET LOCAL search_path isolation"
+```
+
+---
