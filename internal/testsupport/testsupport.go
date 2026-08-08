@@ -1,0 +1,70 @@
+// Package testsupport provides helpers for tests that need a real
+// PostgreSQL connection. It must only ever be imported from _test.go
+// files — it depends on "testing", which has no place in a shipped binary.
+package testsupport
+
+import (
+	"fmt"
+	"math/rand"
+	"os"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
+	"github.com/joho/godotenv"
+)
+
+// OpenTestDB connects to the app_test database described by .env.test at
+// the repo root. It skips (not fails) the calling test when no local
+// PostgreSQL is reachable, so `go test ./...` stays usable on a machine
+// that hasn't set one up — the machine that has gets full coverage.
+func OpenTestDB(t *testing.T) *sqlx.DB {
+	t.Helper()
+	_ = godotenv.Load(findEnvTestFile())
+
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		getenv("DB_USER", "app"),
+		getenv("DB_PASSWORD", "changeme"),
+		getenv("DB_HOST", "localhost"),
+		getenv("DB_PORT", "5432"),
+		getenv("DB_NAME", "app_test"),
+		getenv("DB_SSLMODE", "disable"),
+	)
+
+	db, err := sqlx.Connect("pgx", dsn)
+	if err != nil {
+		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// RandomSchemaName returns a name like "test_a1b2c3d4" that satisfies the
+// tenant schema-name regex, for tests that need their own throwaway schema.
+func RandomSchemaName() string {
+	src := rand.New(rand.NewSource(time.Now().UnixNano()))
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 8)
+	for i := range b {
+		b[i] = letters[src.Intn(len(letters))]
+	}
+	return "test_" + string(b)
+}
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func findEnvTestFile() string {
+	candidates := []string{".env.test", "../../.env.test", "../../../.env.test"}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ".env.test"
+}
