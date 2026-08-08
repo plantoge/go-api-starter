@@ -6970,8 +6970,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 
 	"go-api-starter/internal/apperror"
@@ -7009,6 +7011,16 @@ func wrapDBErr(err error) error {
 	return apperror.Internal(err)
 }
 
+// Amendment (added during Task 17 execution): the original version of
+// this function collapsed every INSERT failure into "email sudah dipakai"
+// — the same misclassification bug Task 14's review found and fixed for
+// tenant provisioning (a missing table, a lost connection, or any other
+// real failure would have been misreported as a duplicate email, hiding
+// the actual cause). Because this module is the copy-paste template every
+// future tenant-scoped module is built from, fixing the pattern here
+// (rather than letting it ship and get copied forward) matters more than
+// in an isolated module — this is checked via the same actual-Postgres-
+// error-code technique Task 14 uses, not a broadened assumption.
 func (r *Repository) Create(ctx context.Context, u User) error {
 	actor, _ := database.ActorFromContext(ctx)
 	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
@@ -7018,10 +7030,11 @@ func (r *Repository) Create(ctx context.Context, u User) error {
 		return err
 	})
 	if err != nil {
-		// A duplicate email is by far the most likely failure here, and
-		// the unique partial index makes it unambiguous — reported as a
-		// conflict rather than a generic 500.
-		return apperror.Conflict("email sudah dipakai")
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return apperror.Conflict("email sudah dipakai")
+		}
+		return apperror.Internal(fmt.Errorf("insert user: %w", err))
 	}
 	return nil
 }

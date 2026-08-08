@@ -6987,8 +6987,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 
 	"go-api-starter/internal/apperror"
@@ -7026,6 +7028,17 @@ func wrapDBErr(err error) error {
 	return apperror.Internal(err)
 }
 
+// Amandemen (ditambahkan saat eksekusi Tugas 17): versi awal fungsi ini
+// menggabungkan semua kegagalan INSERT menjadi "email sudah dipakai" —
+// bug misklasifikasi yang sama seperti yang ditemukan dan diperbaiki oleh
+// review Tugas 14 untuk provisioning tenant (table yang hilang, koneksi
+// terputus, atau kegagalan nyata lainnya akan salah dilaporkan sebagai
+// email duplikat, menyembunyikan penyebab sebenarnya). Karena modul ini
+// adalah template copy-paste tempat setiap modul tenant-scoped berikutnya
+// dibangun, memperbaiki pola ini di sini (bukan membiarkannya lolos dan
+// tersalin ke depan) lebih penting dibanding pada modul yang berdiri
+// sendiri — ini diperiksa lewat teknik kode-error-Postgres-nyata yang
+// sama seperti dipakai Tugas 14, bukan asumsi yang diperluas.
 func (r *Repository) Create(ctx context.Context, u User) error {
 	actor, _ := database.ActorFromContext(ctx)
 	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
@@ -7035,10 +7048,11 @@ func (r *Repository) Create(ctx context.Context, u User) error {
 		return err
 	})
 	if err != nil {
-		// A duplicate email is by far the most likely failure here, and
-		// the unique partial index makes it unambiguous — reported as a
-		// conflict rather than a generic 500.
-		return apperror.Conflict("email sudah dipakai")
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return apperror.Conflict("email sudah dipakai")
+		}
+		return apperror.Internal(fmt.Errorf("insert user: %w", err))
 	}
 	return nil
 }
