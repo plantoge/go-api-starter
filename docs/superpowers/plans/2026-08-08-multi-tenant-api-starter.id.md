@@ -3128,15 +3128,32 @@ Hasil: FAIL — `middleware.Logger` belum ada.
 - [ ] **Langkah 8: Implementasikan logger.go**
 
 Buat `internal/middleware/logger.go`:
+
+**Amandemen (ditambahkan saat eksekusi Tugas 9):** versi awal file ini
+membaca `c.Response().StatusCode()` tanpa syarat setelah `c.Next()`
+kembali. Itu salah untuk setiap respons error/panic: `ErrorHandler` global
+Fiber — yang sebenarnya menulis kode status asli ke respons — baru
+berjalan setelah *seluruh* rantai middleware `app.Use()` selesai
+di-unwind, satu level di atas middleware individual mana pun. Mengubah
+urutan `Logger`/`Recover`/`RequestID` tidak memperbaiki ini, karena
+ketiganya berada dalam rantai yang sama. Perbaikan di bawah membuat
+`Logger` menentukan status dari error yang dikembalikan (memakai ulang
+field `*apperror.Error.Status` yang sama yang sudah dipakai
+`response.Error`) setiap kali `err != nil`, dan hanya memercayai
+`c.Response().StatusCode()` pada jalur sukses di mana tidak ada penulisan
+ulang oleh ErrorHandler.
+
 ```go
 package middleware
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/apperror"
 )
 
 const localsKeyLogger = "logger"
@@ -3163,11 +3180,31 @@ func Logger(base *slog.Logger) fiber.Handler {
 		LoggerFromCtx(c).Info("request",
 			"method", c.Method(),
 			"path", c.Path(),
-			"status", c.Response().StatusCode(),
+			"status", statusFor(c, err),
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 		return err
 	}
+}
+
+// statusFor reports the status this request will actually be answered
+// with. On the success path (err == nil), the handler already set it via
+// c.Status()/c.SendStatus(), so c.Response().StatusCode() is accurate. On
+// the error path, Fiber's global ErrorHandler hasn't run yet at this point
+// in the middleware chain — it runs strictly after every app.Use()
+// middleware returns — so the response object still holds its default
+// status. Resolve the real status from the error itself instead, using the
+// exact same mapping response.Error uses: an *apperror.Error's declared
+// Status, or 500 for anything else.
+func statusFor(c *fiber.Ctx, err error) int {
+	if err == nil {
+		return c.Response().StatusCode()
+	}
+	var appErr *apperror.Error
+	if errors.As(err, &appErr) {
+		return appErr.Status
+	}
+	return 500
 }
 
 // SetLoggerInCtx stores l in both fiber locals (for handlers holding a
