@@ -113,3 +113,52 @@ func readUpFiles(fsys embed.FS, dir string) ([]MigrationFile, error) {
 	sort.Slice(files, func(i, j int) bool { return files[i].Version < files[j].Version })
 	return files, nil
 }
+
+// MigrateTenantUp applies every unapplied migration under tenant/ to the
+// given tenant schema, which must already exist (provisioning creates it
+// before calling this).
+func MigrateTenantUp(db *sql.DB, schemaName string) error {
+	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
+	if err != nil {
+		return err
+	}
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return err
+	}
+	return nil
+}
+
+// TenantSchemaVersion reports the migration version currently applied to
+// schemaName, and whether it's dirty (failed mid-migration). version is 0
+// with dirty=false if no migration has ever been applied.
+func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error) {
+	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
+	if err != nil {
+		return 0, false, err
+	}
+	v, d, err := m.Version()
+	if err == migrate.ErrNilVersion {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return v, d, nil
+}
+
+// LatestTenantVersion returns the highest migration version compiled into
+// this binary under tenant/ — the version every tenant schema is expected
+// to be at. Used by cli migrate status and by the runtime
+// TENANT_MIGRATION_PENDING guard (Task 11).
+func LatestTenantVersion() uint {
+	return latestVersion(TenantFS, "tenant")
+}
+
+// TenantMigrationFiles returns tenant/'s up-migration SQL, in version
+// order, for callers that must apply migrations inside their own already-
+// open transaction — golang-migrate manages its own connection and can't
+// join a caller's transaction, so tenant provisioning (Task 13) reads and
+// execs these directly instead of calling MigrateTenantUp.
+func TenantMigrationFiles() ([]MigrationFile, error) {
+	return readUpFiles(TenantFS, "tenant")
+}
