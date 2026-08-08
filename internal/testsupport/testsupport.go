@@ -39,6 +39,30 @@ func OpenTestDB(t *testing.T) *sqlx.DB {
 	return db
 }
 
+// OpenTestPlatformDB is OpenTestDB with search_path pinned to "platform",
+// mirroring database.NewPlatformPool in production — for tests of code
+// that expects to write unqualified names ("FROM login_attempts") because
+// it assumes a platform-pinned connection.
+func OpenTestPlatformDB(t *testing.T) *sqlx.DB {
+	t.Helper()
+	_ = godotenv.Load(findEnvTestFile())
+
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&search_path=platform",
+		getenv("DB_USER", "app"),
+		getenv("DB_PASSWORD", "changeme"),
+		getenv("DB_HOST", "localhost"),
+		getenv("DB_PORT", "5432"),
+		getenv("DB_NAME", "app_test"),
+		getenv("DB_SSLMODE", "disable"),
+	)
+	db, err := sqlx.Connect("pgx", dsn)
+	if err != nil {
+		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
 // RandomSchemaName returns a name like "test_a1b2c3d4" that satisfies the
 // tenant schema-name regex, for tests that need their own throwaway schema.
 // Uses the package-level math/rand source directly (auto-seeded since
