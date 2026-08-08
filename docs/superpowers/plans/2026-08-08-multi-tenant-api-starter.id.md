@@ -4096,3 +4096,452 @@ git commit -m "feat: platform/tenant auth middleware with cached tenant resoluti
 ```
 
 ---
+
+### Tugas 12: Modul admin platform — bootstrap + auth (login/refresh/logout)
+
+**Berkas:**
+- Buat: `internal/modules/platform/auth/dto.go`
+- Buat: `internal/modules/platform/auth/service.go`
+- Buat: `internal/modules/platform/auth/handler.go`
+- Buat: `cmd/cli/commands/admin.go`
+- Test: `internal/modules/platform/auth/service_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `platformauth.LoginRequest { Email, Password string }`, `RefreshRequest { RefreshToken string }`, `LogoutRequest { RefreshToken string }`
+  - `platformauth.LoginResponse { AccessToken, RefreshToken string; ExpiresIn int }`
+  - `platformauth.NewService(platformDB *sqlx.DB, tokens *auth.TokenManager, accessTTL, refreshTTL time.Duration, rateLimiter *ratelimit.LoginAttemptService) *Service`
+  - `(s *Service) Login(ctx, LoginRequest) (LoginResponse, error)`, `Refresh(ctx, RefreshRequest) (LoginResponse, error)`, `Logout(ctx, LogoutRequest) error`
+  - `platformauth.NewHandler(svc *Service) *Handler` dengan method `Login`, `Refresh`, `Logout` (`func(c *fiber.Ctx) error`), disambungkan ke rute di Tugas 18.
+  - Perintah CLI: `cli admin create --email=<e> --name=<n>` (bootstrap, tanpa auth).
+
+- [ ] **Langkah 1: Tulis test service yang gagal**
+
+Buat `internal/modules/platform/auth/service_test.go`:
+```go
+package auth_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/migration"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/testsupport"
+)
+
+func setupService(t *testing.T) (*platformauth.Service, string) {
+	t.Helper()
+	rawDB := testsupport.OpenTestDB(t)
+	if err := migration.MigratePlatformUp(rawDB.DB); err != nil {
+		t.Fatalf("MigratePlatformUp: %v", err)
+	}
+	t.Cleanup(func() {
+		rawDB.Exec("TRUNCATE platform.refresh_tokens, platform.users, platform.login_attempts CASCADE")
+	})
+
+	platformDB := testsupport.OpenTestPlatformDB(t)
+
+	plainPassword := "correct-horse-battery"
+	hash, err := appauth.HashPassword(plainPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = platformDB.Exec(
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, $2, $3, $4, true)`,
+		uuid.New(), "admin@example.com", hash, "Admin")
+	if err != nil {
+		t.Fatalf("insert admin user: %v", err)
+	}
+
+	tokens := appauth.NewTokenManager("test-secret", 15*time.Minute)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformDB, 5, 15*time.Minute)
+	svc := platformauth.NewService(platformDB, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	return svc, plainPassword
+}
+
+func TestLogin_ValidCredentials_ReturnsTokens(t *testing.T) {
+	svc, password := setupService(t)
+
+	res, err := svc.Login(context.Background(), platformauth.LoginRequest{Email: "admin@example.com", Password: password})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if res.AccessToken == "" || res.RefreshToken == "" {
+		t.Error("Login() returned an empty token")
+	}
+}
+
+func TestLogin_WrongPassword_ReturnsUnauthorized(t *testing.T) {
+	svc, _ := setupService(t)
+
+	if _, err := svc.Login(context.Background(), platformauth.LoginRequest{Email: "admin@example.com", Password: "wrong"}); err == nil {
+		t.Fatal("Login() with a wrong password succeeded")
+	}
+}
+
+func TestRefresh_ValidToken_IssuesNewAccessToken(t *testing.T) {
+	svc, password := setupService(t)
+	login, err := svc.Login(context.Background(), platformauth.LoginRequest{Email: "admin@example.com", Password: password})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	res, err := svc.Refresh(context.Background(), platformauth.RefreshRequest{RefreshToken: login.RefreshToken})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if res.AccessToken == "" {
+		t.Error("Refresh() returned an empty access token")
+	}
+}
+
+func TestLogout_RevokesRefreshToken(t *testing.T) {
+	svc, password := setupService(t)
+	login, err := svc.Login(context.Background(), platformauth.LoginRequest{Email: "admin@example.com", Password: password})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if err := svc.Logout(context.Background(), platformauth.LogoutRequest{RefreshToken: login.RefreshToken}); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, err := svc.Refresh(context.Background(), platformauth.RefreshRequest{RefreshToken: login.RefreshToken}); err == nil {
+		t.Error("Refresh() succeeded with a revoked refresh token")
+	}
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/modules/platform/auth/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan dto.go**
+
+Buat `internal/modules/platform/auth/dto.go`:
+```go
+package auth
+
+type LoginRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
+}
+
+type LoginResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+type LogoutRequest struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+```
+
+- [ ] **Langkah 4: Implementasikan service.go**
+
+Buat `internal/modules/platform/auth/service.go`:
+```go
+package auth
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/ratelimit"
+)
+
+type adminUser struct {
+	ID           uuid.UUID `db:"id"`
+	Email        string    `db:"email"`
+	PasswordHash string    `db:"password_hash"`
+	IsActive     bool      `db:"is_active"`
+}
+
+type Service struct {
+	db          *sqlx.DB // platform-pinned pool
+	tokens      *appauth.TokenManager
+	accessTTL   time.Duration
+	refreshTTL  time.Duration
+	rateLimiter *ratelimit.LoginAttemptService
+}
+
+func NewService(platformDB *sqlx.DB, tokens *appauth.TokenManager, accessTTL, refreshTTL time.Duration, rateLimiter *ratelimit.LoginAttemptService) *Service {
+	return &Service{db: platformDB, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
+}
+
+func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, error) {
+	if err := s.rateLimiter.Check(ctx, appauth.ScopePlatform, nil, req.Email); err != nil {
+		return LoginResponse{}, err
+	}
+
+	var u adminUser
+	err := s.db.GetContext(ctx, &u,
+		`SELECT id, email, password_hash, is_active FROM users WHERE email = $1 AND deleted_at IS NULL`,
+		req.Email)
+	valid := err == nil && u.IsActive && appauth.VerifyPassword(u.PasswordHash, req.Password)
+
+	s.rateLimiter.Record(ctx, appauth.ScopePlatform, nil, req.Email, valid)
+	if !valid {
+		return LoginResponse{}, apperror.Unauthorized("email atau password salah")
+	}
+
+	return s.issueTokens(ctx, u.ID)
+}
+
+func (s *Service) issueTokens(ctx context.Context, userID uuid.UUID) (LoginResponse, error) {
+	access, err := s.tokens.IssueAccessToken(userID, appauth.ScopePlatform, nil)
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	plain, hash, err := appauth.GenerateRefreshToken()
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+		uuid.New(), userID, hash, time.Now().Add(s.refreshTTL))
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	return LoginResponse{AccessToken: access, RefreshToken: plain, ExpiresIn: int(s.accessTTL.Seconds())}, nil
+}
+
+func (s *Service) Refresh(ctx context.Context, req RefreshRequest) (LoginResponse, error) {
+	hash := appauth.HashRefreshToken(req.RefreshToken)
+
+	var row struct {
+		UserID    uuid.UUID  `db:"user_id"`
+		ExpiresAt time.Time  `db:"expires_at"`
+		RevokedAt *time.Time `db:"revoked_at"`
+	}
+	err := s.db.GetContext(ctx, &row,
+		`SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = $1`, hash)
+	if err != nil {
+		return LoginResponse{}, apperror.Unauthorized("refresh token tidak valid")
+	}
+	if row.RevokedAt != nil || time.Now().After(row.ExpiresAt) {
+		return LoginResponse{}, apperror.Unauthorized("refresh token sudah tidak berlaku")
+	}
+
+	// No rotation (spec: refresh tokens are not rotated on use) — the same
+	// refresh token stays valid, only a new access token is issued.
+	access, err := s.tokens.IssueAccessToken(row.UserID, appauth.ScopePlatform, nil)
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+	return LoginResponse{AccessToken: access, RefreshToken: req.RefreshToken, ExpiresIn: int(s.accessTTL.Seconds())}, nil
+}
+
+func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
+	hash := appauth.HashRefreshToken(req.RefreshToken)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, hash)
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/modules/platform/auth/... -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 6: Implementasikan handler**
+
+Buat `internal/modules/platform/auth/handler.go`:
+```go
+package auth
+
+import (
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/response"
+	"go-api-starter/internal/validator"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+func badBody(c *fiber.Ctx) error {
+	return response.Error(c, middleware.RequestIDFromCtx(c),
+		apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+}
+
+func (h *Handler) Login(c *fiber.Ctx) error {
+	var req LoginRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	res, err := h.svc.Login(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, res)
+}
+
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+	var req RefreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	res, err := h.svc.Refresh(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, res)
+}
+
+func (h *Handler) Logout(c *fiber.Ctx) error {
+	var req LogoutRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	if err := h.svc.Logout(c.UserContext(), req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil logout"})
+}
+```
+
+- [ ] **Langkah 7: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 8: Tulis perintah CLI bootstrap admin**
+
+Buat `cmd/cli/commands/admin.go`:
+```go
+package commands
+
+import (
+	"flag"
+	"fmt"
+
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/database"
+)
+
+func init() {
+	Register("admin create", cmdAdminCreate)
+}
+
+// cmdAdminCreate solves the chicken-and-egg problem of the very first
+// platform admin: creating one normally requires being logged in as one,
+// but platform.users starts empty. This command runs with no auth check
+// at all — its safety comes from requiring shell access to the server, not
+// from a token — and prints a random password once, which must be changed
+// on first login.
+func cmdAdminCreate(args []string) error {
+	fs := flag.NewFlagSet("admin create", flag.ExitOnError)
+	email := fs.String("email", "", "admin email (required)")
+	name := fs.String("name", "", "admin name (required)")
+	fs.Parse(args)
+
+	if *email == "" || *name == "" {
+		return fmt.Errorf("both --email and --name are required")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	pool, err := database.NewPlatformPool(cfg.DB)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	password, err := generateRandomPassword()
+	if err != nil {
+		return err
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return err
+	}
+
+	_, err = pool.Exec(
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, $2, $3, $4, true)`,
+		uuid.New(), *email, hash, *name)
+	if err != nil {
+		return fmt.Errorf("insert admin user: %w", err)
+	}
+
+	fmt.Println("admin berhasil dibuat:")
+	fmt.Println("  email:   ", *email)
+	fmt.Println("  password:", password)
+	fmt.Println("(password ini hanya ditampilkan sekali — ganti setelah login pertama)")
+	return nil
+}
+
+func generateRandomPassword() (string, error) {
+	// Reuses the same crypto/rand 32-byte generator as refresh tokens
+	// rather than adding a second random-string helper.
+	plain, _, err := auth.GenerateRefreshToken()
+	if err != nil {
+		return "", err
+	}
+	return plain[:20], nil
+}
+```
+
+- [ ] **Langkah 9: Verifikasi manual**
+
+Jalankan:
+```bash
+go run ./cmd/cli migrate platform up
+go run ./cmd/cli admin create --email=you@example.com --name="Your Name"
+```
+Hasil: mencetak password yang di-generate. Salin — Tugas 18 memungkinkan kamu benar-benar login memakainya begitu HTTP server sudah ada.
+
+- [ ] **Langkah 10: Commit**
+
+```bash
+git add internal/modules/platform/auth cmd/cli/commands/admin.go
+git commit -m "feat: platform admin auth (login/refresh/logout) and bootstrap CLI command"
+```
+
+---
