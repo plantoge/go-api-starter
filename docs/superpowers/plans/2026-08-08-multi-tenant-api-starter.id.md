@@ -2113,3 +2113,418 @@ git commit -m "feat: CLI skeleton and platform schema migrations"
 ```
 
 ---
+
+### Tugas 7: Migrasi tenant
+
+Pembuatan schema tenant juga **bukan** migration file di sini — provisioning (Tugas 14) menjalankan `CREATE SCHEMA` langsung sebelum menerapkan migrasi-migrasi ini, dengan alasan golang-migrate yang sama seperti Tugas 6.
+
+**Berkas:**
+- Buat: `internal/migration/tenant_fs.go`
+- Buat: `internal/migration/tenant/000001_create_updated_at_trigger_fn.up.sql` (+ `.down.sql`)
+- Buat: `internal/migration/tenant/000002_create_users_table.up.sql` (+ `.down.sql`)
+- Buat: `internal/migration/tenant/000003_create_roles_permissions_tables.up.sql` (+ `.down.sql`)
+- Buat: `internal/migration/tenant/000004_create_refresh_tokens_table.up.sql` (+ `.down.sql`)
+- Ubah: `internal/migration/runner.go` — tambah fungsi sisi tenant
+- Ubah: `cmd/cli/commands/migrate.go` — tambah `migrate tenant up` dan `migrate status`
+- Test: Ubah `internal/migration/runner_test.go` — tambah cakupan tenant
+
+**Antarmuka:**
+- Menghasilkan:
+  - `migration.MigrateTenantUp(db *sql.DB, schemaName string) error`
+  - `migration.TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error)`
+  - `migration.LatestTenantVersion() uint`
+  - `migration.TenantMigrationFiles() ([]MigrationFile, error)` — dipakai provisioning di Tugas 14.
+  - Perintah CLI: `cli migrate tenant up --all`, `cli migrate tenant up --tenant=<code>`, `cli migrate status`
+
+- [ ] **Langkah 1: Tulis berkas SQL migrasi tenant**
+
+Buat `internal/migration/tenant/000001_create_updated_at_trigger_fn.up.sql`:
+```sql
+CREATE OR REPLACE FUNCTION trigger_set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+Buat `internal/migration/tenant/000001_create_updated_at_trigger_fn.down.sql`:
+```sql
+DROP FUNCTION IF EXISTS trigger_set_updated_at();
+```
+
+Buat `internal/migration/tenant/000002_create_users_table.up.sql`:
+```sql
+CREATE TABLE users (
+    id             UUID PRIMARY KEY,
+    email          TEXT NOT NULL,
+    password_hash  TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT true,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at     TIMESTAMPTZ NULL,
+    created_by     UUID NULL,
+    updated_by     UUID NULL,
+    deleted_by     UUID NULL
+);
+
+CREATE UNIQUE INDEX users_email_key ON users (email) WHERE deleted_at IS NULL;
+
+CREATE TRIGGER set_updated_at
+    BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+```
+
+Buat `internal/migration/tenant/000002_create_users_table.down.sql`:
+```sql
+DROP TABLE IF EXISTS users;
+```
+
+Buat `internal/migration/tenant/000003_create_roles_permissions_tables.up.sql`:
+```sql
+CREATE TABLE roles (
+    id          UUID PRIMARY KEY,
+    name        TEXT NOT NULL,
+    is_system   BOOLEAN NOT NULL DEFAULT false,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at  TIMESTAMPTZ NULL,
+    created_by  UUID NULL,
+    updated_by  UUID NULL,
+    deleted_by  UUID NULL
+);
+
+CREATE UNIQUE INDEX roles_name_key ON roles (name) WHERE deleted_at IS NULL;
+
+CREATE TRIGGER set_updated_at
+    BEFORE UPDATE ON roles
+    FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+CREATE TABLE permissions (
+    id          UUID PRIMARY KEY,
+    code        TEXT NOT NULL,
+    "group"     TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at  TIMESTAMPTZ NULL,
+    created_by  UUID NULL,
+    updated_by  UUID NULL,
+    deleted_by  UUID NULL
+);
+
+CREATE UNIQUE INDEX permissions_code_key ON permissions (code) WHERE deleted_at IS NULL;
+
+CREATE TRIGGER set_updated_at
+    BEFORE UPDATE ON permissions
+    FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+CREATE TABLE role_permissions (
+    role_id        UUID NOT NULL REFERENCES roles (id),
+    permission_id  UUID NOT NULL REFERENCES permissions (id),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by     UUID NULL,
+    PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE user_roles (
+    user_id     UUID NOT NULL REFERENCES users (id),
+    role_id     UUID NOT NULL REFERENCES roles (id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by  UUID NULL,
+    PRIMARY KEY (user_id, role_id)
+);
+```
+
+Buat `internal/migration/tenant/000003_create_roles_permissions_tables.down.sql`:
+```sql
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS role_permissions;
+DROP TABLE IF EXISTS permissions;
+DROP TABLE IF EXISTS roles;
+```
+
+Buat `internal/migration/tenant/000004_create_refresh_tokens_table.up.sql`:
+```sql
+CREATE TABLE refresh_tokens (
+    id          UUID PRIMARY KEY,
+    user_id     UUID NOT NULL REFERENCES users (id),
+    token_hash  TEXT NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    revoked_at  TIMESTAMPTZ NULL,
+    user_agent  TEXT NULL,
+    ip          TEXT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX refresh_tokens_hash_key ON refresh_tokens (token_hash);
+CREATE INDEX refresh_tokens_user_id_idx ON refresh_tokens (user_id);
+```
+
+Buat `internal/migration/tenant/000004_create_refresh_tokens_table.down.sql`:
+```sql
+DROP TABLE IF EXISTS refresh_tokens;
+```
+
+- [ ] **Langkah 2: Tambah embed tenant**
+
+Buat `internal/migration/tenant_fs.go`:
+```go
+package migration
+
+import "embed"
+
+//go:embed tenant/*.sql
+var TenantFS embed.FS
+```
+
+- [ ] **Langkah 3: Perluas test yang gagal**
+
+Ubah `internal/migration/runner_test.go` — tambahkan dua test ini ke berkas yang sudah ada (pertahankan dua test dari Tugas 6):
+```go
+func TestMigrateTenantUp_AndVersionReporting(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	db := pool.DB
+
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+
+	if err := migration.MigrateTenantUp(db, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	version, dirty, err := migration.TenantSchemaVersion(db, schema)
+	if err != nil {
+		t.Fatalf("TenantSchemaVersion: %v", err)
+	}
+	if dirty {
+		t.Error("schema reported dirty after a clean migration")
+	}
+	if version != migration.LatestTenantVersion() {
+		t.Errorf("version = %d, want latest %d", version, migration.LatestTenantVersion())
+	}
+}
+
+func TestTenantMigrationFiles_ReturnsAllFilesInOrder(t *testing.T) {
+	files, err := migration.TenantMigrationFiles()
+	if err != nil {
+		t.Fatalf("TenantMigrationFiles: %v", err)
+	}
+	if len(files) != 4 {
+		t.Fatalf("got %d files, want 4", len(files))
+	}
+	for i, f := range files {
+		if f.Version != uint(i+1) {
+			t.Errorf("files[%d].Version = %d, want %d (files must be in ascending order)", i, f.Version, i+1)
+		}
+		if f.SQL == "" {
+			t.Errorf("files[%d].SQL is empty", i)
+		}
+	}
+}
+```
+
+- [ ] **Langkah 4: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/migration/... -v`
+Hasil: FAIL — `migration.MigrateTenantUp` dkk. belum ada.
+
+- [ ] **Langkah 5: Perluas runner**
+
+Ubah `internal/migration/runner.go` — tambahkan fungsi-fungsi ini di akhir berkas:
+```go
+// MigrateTenantUp applies every unapplied migration under tenant/ to the
+// given tenant schema, which must already exist (provisioning creates it
+// before calling this).
+func MigrateTenantUp(db *sql.DB, schemaName string) error {
+	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
+	if err != nil {
+		return err
+	}
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return err
+	}
+	return nil
+}
+
+// TenantSchemaVersion reports the migration version currently applied to
+// schemaName, and whether it's dirty (failed mid-migration). version is 0
+// with dirty=false if no migration has ever been applied.
+func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error) {
+	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
+	if err != nil {
+		return 0, false, err
+	}
+	v, d, err := m.Version()
+	if err == migrate.ErrNilVersion {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return v, d, nil
+}
+
+// LatestTenantVersion returns the highest migration version compiled into
+// this binary under tenant/ — the version every tenant schema is expected
+// to be at. Used by cli migrate status and by the runtime
+// TENANT_MIGRATION_PENDING guard (Task 11).
+func LatestTenantVersion() uint {
+	return latestVersion(TenantFS, "tenant")
+}
+
+// TenantMigrationFiles returns tenant/'s up-migration SQL, in version
+// order, for callers that must apply migrations inside their own already-
+// open transaction — golang-migrate manages its own connection and can't
+// join a caller's transaction, so tenant provisioning (Task 13) reads and
+// execs these directly instead of calling MigrateTenantUp.
+func TenantMigrationFiles() ([]MigrationFile, error) {
+	return readUpFiles(TenantFS, "tenant")
+}
+```
+
+- [ ] **Langkah 6: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/migration/... -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 7: Tambah perintah CLI migrasi tenant**
+
+Ubah `cmd/cli/commands/migrate.go` — tambahkan ke blok `init()` dan tambahkan fungsi-fungsi ini:
+```go
+func init() {
+	Register("migrate platform up", cmdMigratePlatformUp)
+	Register("migrate tenant up", cmdMigrateTenantUp)
+	Register("migrate status", cmdMigrateStatus)
+}
+```
+(Ganti `init()` satu baris dari Tugas 6 dengan versi tiga baris ini.)
+
+```go
+type tenantTarget struct {
+	code       string
+	schemaName string
+}
+
+func tenantSchemasToMigrate(db *sql.DB, all bool, code string) ([]tenantTarget, error) {
+	query := "SELECT code, schema_name FROM platform.tenants WHERE deleted_at IS NULL"
+	var args []any
+	if !all {
+		if code == "" {
+			return nil, fmt.Errorf("pass --all or --tenant=<code>")
+		}
+		query += " AND code = $1"
+		args = append(args, code)
+	}
+	query += " ORDER BY code"
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var targets []tenantTarget
+	for rows.Next() {
+		var t tenantTarget
+		if err := rows.Scan(&t.code, &t.schemaName); err != nil {
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+	return targets, rows.Err()
+}
+
+func cmdMigrateTenantUp(args []string) error {
+	fs := flag.NewFlagSet("migrate tenant up", flag.ExitOnError)
+	all := fs.Bool("all", false, "apply to every tenant")
+	tenantCode := fs.String("tenant", "", "apply to a single tenant by code")
+	fs.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	targets, err := tenantSchemasToMigrate(db, *all, *tenantCode)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no matching tenants found")
+	}
+
+	done := 0
+	for _, tgt := range targets {
+		fmt.Printf("migrating %s ... ", tgt.code)
+		if err := migration.MigrateTenantUp(db, tgt.schemaName); err != nil {
+			fmt.Println("FAILED")
+			return fmt.Errorf("tenant %s: %w (stopped after %d of %d tenants)",
+				tgt.code, err, done, len(targets))
+		}
+		fmt.Println("ok")
+		done++
+	}
+	return nil
+}
+
+func cmdMigrateStatus(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	targets, err := tenantSchemasToMigrate(db, true, "")
+	if err != nil {
+		return err
+	}
+
+	latest := migration.LatestTenantVersion()
+	for _, tgt := range targets {
+		version, dirty, err := migration.TenantSchemaVersion(db, tgt.schemaName)
+		if err != nil {
+			fmt.Printf("%-20s ERROR: %v\n", tgt.code, err)
+			continue
+		}
+		status := "up to date"
+		switch {
+		case dirty:
+			status = "DIRTY — needs manual repair"
+		case version < latest:
+			status = fmt.Sprintf("BEHIND (at %d, latest %d)", version, latest)
+		}
+		fmt.Printf("%-20s %s\n", tgt.code, status)
+	}
+	return nil
+}
+```
+
+Tambahkan `"flag"` ke blok import di atas `cmd/cli/commands/migrate.go`.
+
+- [ ] **Langkah 8: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 9: Commit**
+
+```bash
+git add internal/migration cmd/cli/commands/migrate.go
+git commit -m "feat: tenant schema migrations and cli migrate tenant/status commands"
+```
+
+---
