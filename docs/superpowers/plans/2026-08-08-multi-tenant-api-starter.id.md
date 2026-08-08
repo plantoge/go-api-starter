@@ -13,12 +13,12 @@
 
 **Arsitektur:** Handler HTTP Fiber v2 dibuat setipis mungkin dan langsung mengonversi semuanya jadi `context.Context` (tidak pernah mengoper `*fiber.Ctx` melewati layer handler). Service memegang business logic dan sama sekali tidak tahu soal HTTP. Repository menjalankan SQL lewat sqlx terhadap koneksi yang di-scope per-request ke schema satu tenant lewat `SET LOCAL search_path` di dalam transaksi (`database.WithTenant`). Data platform (tenant, admin platform) hidup di schema `platform` miliknya sendiri, di pool koneksi yang di-pin terpisah.
 
-**Stack Teknologi:** Go 1.22, Fiber v2, PostgreSQL, sqlx + pgx (driver `stdlib`), golang-migrate (sumber embedded `iofs`), golang-jwt/jwt/v5, bcrypt, go-playground/validator/v10, log/slog (JSON), oklog/ulid/v2 (request ID), swaggo/swag, air (hot reload saat development). Tanpa Docker sama sekali — development, testing, dan deploy semuanya menjalankan PostgreSQL dan binary Go langsung di host.
+**Stack Teknologi:** Go 1.25, Fiber v2, PostgreSQL, sqlx + pgx (driver `stdlib`), golang-migrate (sumber embedded `iofs`), golang-jwt/jwt/v5, bcrypt, go-playground/validator/v10, log/slog (JSON), oklog/ulid/v2 (request ID), swaggo/swag, air (hot reload saat development). Tanpa Docker sama sekali — development, testing, dan deploy semuanya menjalankan PostgreSQL dan binary Go langsung di host.
 
 ## Batasan Global
 
 - Module path: `go-api-starter` (tanpa prefix host VCS — starter privat, belum dipublikasikan).
-- Versi Go: minimal 1.22 (`go.mod`).
+- Versi Go: minimal 1.25 (dinaikkan dari 1.22 semula saat Tugas 4 — golang.org/x/crypto/sys/text versi terkini butuh 1.25; mengunci dependency crypto lama demi bertahan di 1.22 dinilai trade-off yang lebih buruk daripada menaikkan floor) (`go.mod`).
 - `*fiber.Ctx` tidak boleh pernah dioper ke fungsi service atau repository — handler mengonversinya ke `context.Context` (lewat `c.UserContext()`, yang diisi middleware) sebelum memanggil `service.*`.
 - Semua akses data tenant lewat `database.WithTenant(ctx, fn)` — tidak ada repository yang boleh memegang `*sqlx.DB` polos untuk tabel tenant.
 - Setiap tabel punya `created_at, updated_at, deleted_at, created_by, updated_by, deleted_by` **kecuali**: tabel penghubung (`role_permissions`, `user_roles` — cuma `created_at`+`created_by`, hard-delete) dan tabel log/token (`refresh_tokens`, `login_attempts` — cuma `created_at`).
@@ -145,7 +145,7 @@ Hasil: membuat `go.mod` dengan `module go-api-starter` dan direktif `go`.
 
 - [ ] **Langkah 2: Tetapkan versi minimal Go**
 
-Edit `go.mod`, pastikan direktif `go` berbunyi `go 1.22`.
+Edit `go.mod`, pastikan direktif `go` berbunyi `go 1.25`.
 
 - [ ] **Langkah 3: Tambah `.gitattributes` supaya script dan SQL selalu LF**
 
@@ -7950,7 +7950,7 @@ Buat `docs/getting-started.md`:
 
 ## 1. Install prasyarat
 
-- Go 1.22+
+- Go 1.25+
 - PostgreSQL, jalan lokal
 - `air` untuk hot reload: `go install github.com/air-verse/air@latest`
 

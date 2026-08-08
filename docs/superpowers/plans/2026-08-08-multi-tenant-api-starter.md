@@ -6,12 +6,12 @@
 
 **Architecture:** Fiber v2 HTTP handlers stay thin and convert everything to `context.Context` immediately (never pass `*fiber.Ctx` past the handler layer). Services hold business logic and know nothing about HTTP. Repositories run SQL via sqlx against connections scoped per-request to a tenant's schema through `SET LOCAL search_path` inside a transaction (`database.WithTenant`). Platform data (tenants, platform admins) lives in its own `platform` schema on a separately pinned connection pool.
 
-**Tech Stack:** Go 1.22, Fiber v2, PostgreSQL, sqlx + pgx (`stdlib` driver), golang-migrate (`iofs` embedded source), golang-jwt/jwt/v5, bcrypt, go-playground/validator/v10, log/slog (JSON), oklog/ulid/v2 (request IDs), swaggo/swag, air (dev hot reload). No Docker anywhere — dev, test, and deploy all run PostgreSQL and the Go binary directly on the host.
+**Tech Stack:** Go 1.25, Fiber v2, PostgreSQL, sqlx + pgx (`stdlib` driver), golang-migrate (`iofs` embedded source), golang-jwt/jwt/v5, bcrypt, go-playground/validator/v10, log/slog (JSON), oklog/ulid/v2 (request IDs), swaggo/swag, air (dev hot reload). No Docker anywhere — dev, test, and deploy all run PostgreSQL and the Go binary directly on the host.
 
 ## Global Constraints
 
 - Module path: `go-api-starter` (no VCS host prefix — private starter, not yet published).
-- Go version: 1.22 minimum (`go.mod`).
+- Go version: 1.25 minimum (raised from the original 1.22 during Task 4 — golang.org/x/crypto/sys/text at current releases require 1.25; pinning older transitive crypto deps to preserve 1.22 was judged a worse tradeoff than raising the floor) (`go.mod`).
 - `*fiber.Ctx` must never be passed into a service or repository function — handlers convert to `context.Context` (via `c.UserContext()`, populated by middleware) before calling `service.*`.
 - All tenant data access goes through `database.WithTenant(ctx, fn)` — no repository may hold a bare `*sqlx.DB` for tenant tables.
 - Every table gets `created_at, updated_at, deleted_at, created_by, updated_by, deleted_by` **except**: join tables (`role_permissions`, `user_roles` — `created_at`+`created_by` only, hard-deleted) and log/token tables (`refresh_tokens`, `login_attempts` — `created_at` only).
@@ -138,7 +138,7 @@ Expected: creates `go.mod` with `module go-api-starter` and a `go` directive.
 
 - [ ] **Step 2: Set Go version floor**
 
-Edit `go.mod`, ensure the `go` directive reads `go 1.22`.
+Edit `go.mod`, ensure the `go` directive reads `go 1.25`.
 
 - [ ] **Step 3: Add `.gitattributes` to force LF on scripts and SQL**
 
@@ -7937,7 +7937,7 @@ Create `docs/getting-started.md`:
 
 ## 1. Install prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - PostgreSQL, running locally
 - `air` for hot reload: `go install github.com/air-verse/air@latest`
 
