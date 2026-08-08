@@ -8327,3 +8327,243 @@ git commit -m "docs: deployment artifacts, CLAUDE.md, and full documentation set
 ```
 
 ---
+
+### Tugas 22: Dokumentasi OpenAPI lewat `swaggo/swag`
+
+Menutup satu item dari tabel stack spec yang belum ada tugasnya: `swaggo/swag` men-generate dokumentasi OpenAPI dari komentar tepat di atas setiap handler, jadi dokumentasinya tidak bisa jauh menyimpang dari kode tanpa `swag init` gagal compile secara nyata.
+
+**Catatan bahasa:** anotasi `@Summary` dkk. di bawah ini sengaja dibiarkan Bahasa Inggris — itu konvensi umum ekosistem OpenAPI/Swagger dan tetap konsisten dengan aturan "identifier & anotasi tooling tetap Inggris" di Batasan Global.
+
+**Berkas:**
+- Ubah: `cmd/api/main.go` — tambah anotasi API umum
+- Ubah: `internal/modules/platform/auth/handler.go` — tambah anotasi
+- Ubah: `internal/modules/tenant/auth/handler.go` — tambah anotasi
+- Ubah: `internal/modules/tenant/user/handler.go` — tambah anotasi
+- Ubah: `internal/server/router.go` — sajikan spec yang di-generate
+- Ubah: `Makefile` — tambah `make swagger`
+- Buat: `docs/swagger/` (hasil generate, bukan tulisan tangan)
+
+- [ ] **Langkah 1: Install CLI swag dan tambah dependency runtime**
+
+Jalankan:
+```bash
+go install github.com/swaggo/swag/cmd/swag@latest
+go get github.com/gofiber/swagger
+go get github.com/swaggo/swag
+```
+
+- [ ] **Langkah 2: Tambah anotasi API umum ke `main.go`**
+
+Ubah `cmd/api/main.go` — tambahkan blok komentar ini tepat di atas `package main`:
+```go
+// @title           App API
+// @version         1.0
+// @description     Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.
+// @BasePath        /api/v1
+package main
+```
+
+- [ ] **Langkah 3: Anotasi handler auth platform**
+
+Ubah `internal/modules/platform/auth/handler.go` — tambahkan blok komentar tepat di atas tiap method:
+```go
+// Login godoc
+// @Summary      Admin login
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LoginRequest true "credentials"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /admin/auth/login [post]
+func (h *Handler) Login(c *fiber.Ctx) error {
+```
+```go
+// Refresh godoc
+// @Summary      Refresh an admin access token
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body RefreshRequest true "refresh token"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /admin/auth/refresh [post]
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+```
+```go
+// Logout godoc
+// @Summary      Revoke an admin refresh token
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LogoutRequest true "refresh token"
+// @Success      200 {object} map[string]any
+// @Router       /admin/auth/logout [post]
+func (h *Handler) Logout(c *fiber.Ctx) error {
+```
+(Ganti baris `func (h *Handler) Login(c *fiber.Ctx) error {` polos yang sudah ada di berkas dengan versi beranotasi ini — isi method di bawahnya tidak berubah dari Tugas 12.)
+
+- [ ] **Langkah 4: Anotasi handler auth tenant**
+
+Ubah `internal/modules/tenant/auth/handler.go` dengan cara yang sama:
+```go
+// Login godoc
+// @Summary      Tenant staff login
+// @Tags         tenant-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LoginRequest true "tenant_code, credentials"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /auth/login [post]
+func (h *Handler) Login(c *fiber.Ctx) error {
+```
+```go
+// Refresh godoc
+// @Summary      Refresh a tenant access token
+// @Tags         tenant-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body RefreshRequest true "tenant_code, refresh token"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /auth/refresh [post]
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+```
+```go
+// Logout godoc
+// @Summary      Revoke a tenant refresh token
+// @Tags         tenant-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LogoutRequest true "tenant_code, refresh token"
+// @Success      200 {object} map[string]any
+// @Router       /auth/logout [post]
+func (h *Handler) Logout(c *fiber.Ctx) error {
+```
+
+- [ ] **Langkah 5: Anotasi handler user tenant**
+
+Ubah `internal/modules/tenant/user/handler.go`:
+```go
+// Create godoc
+// @Summary      Create a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        body body CreateRequest true "new user"
+// @Success      201 {object} View
+// @Failure      422 {object} map[string]any
+// @Router       /users [post]
+func (h *Handler) Create(c *fiber.Ctx) error {
+```
+```go
+// Get godoc
+// @Summary      Get a tenant user by ID
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        id path string true "user id"
+// @Success      200 {object} View
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [get]
+func (h *Handler) Get(c *fiber.Ctx) error {
+```
+```go
+// List godoc
+// @Summary      List tenant users
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        page query int false "page number"
+// @Param        limit query int false "page size, max 100"
+// @Param        sort query string false "created_at, name, or email"
+// @Param        order query string false "asc or desc"
+// @Success      200 {object} map[string]any
+// @Router       /users [get]
+func (h *Handler) List(c *fiber.Ctx) error {
+```
+```go
+// Update godoc
+// @Summary      Update a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        id path string true "user id"
+// @Param        body body UpdateRequest true "fields to change"
+// @Success      200 {object} map[string]any
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [patch]
+func (h *Handler) Update(c *fiber.Ctx) error {
+```
+```go
+// Delete godoc
+// @Summary      Soft-delete a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        id path string true "user id"
+// @Success      200 {object} map[string]any
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [delete]
+func (h *Handler) Delete(c *fiber.Ctx) error {
+```
+
+- [ ] **Langkah 6: Generate spec-nya**
+
+Jalankan:
+```bash
+swag init -g cmd/api/main.go -o docs/swagger
+```
+Hasil: membuat `docs/swagger/docs.go`, `swagger.json`, `swagger.yaml`.
+
+- [ ] **Langkah 7: Sajikan lewat HTTP**
+
+Ubah `internal/server/router.go` — tambahkan ke blok import:
+```go
+swaggerui "github.com/gofiber/swagger"
+_ "go-api-starter/docs/swagger" // generated by `swag init`; registers the spec swaggerui reads
+```
+dan tambahkan, tepat setelah `app := fiber.New(...)` dan sebelum rantai middleware:
+```go
+app.Get("/swagger/*", swaggerui.HandlerDefault)
+```
+
+- [ ] **Langkah 8: Tambah target Makefile**
+
+Ubah `Makefile` — tambahkan:
+```makefile
+swagger:
+	swag init -g cmd/api/main.go -o docs/swagger
+```
+dan tambahkan `swagger` ke baris `.PHONY`.
+
+- [ ] **Langkah 9: Pastikan bisa di-build dan disajikan**
+
+Jalankan:
+```bash
+go build ./...
+go run ./cmd/api
+```
+Lalu buka `http://localhost:8080/swagger/index.html` di browser.
+Hasil: Swagger UI muncul dan mendaftar setiap endpoint yang dianotasi, dikelompokkan per tag (`platform-auth`, `tenant-auth`, `users`).
+
+- [ ] **Langkah 10: Commit**
+
+```bash
+git add cmd/api internal/modules internal/server docs/swagger Makefile go.mod go.sum
+git commit -m "docs: OpenAPI documentation via swaggo/swag"
+```
+
+---
+
+## Verifikasi Akhir
+
+- [ ] Jalankan `go build ./...` — berhasil tanpa error.
+- [ ] Jalankan `go vet ./...` — tanpa warning.
+- [ ] Jalankan `go test ./...` — semua test dari Tugas 2–20 lolos.
+- [ ] Jalankan smoke test manual dari Tugas 18 Langkah 8, dari awal sampai akhir di database bersih.
+- [ ] Buka `http://localhost:8080/swagger/index.html` dan pastikan semua endpoint terdaftar (Tugas 22).
+- [ ] Pastikan `git log --oneline` menunjukkan satu commit per tugas, masing-masing dengan test yang lolos pada titik itu di riwayatnya.
