@@ -7489,3 +7489,226 @@ git commit -m "feat: cli cleanup command for expired refresh tokens and login at
 ```
 
 ---
+
+### Tugas 20: Integration test — isolasi tenant, end-to-end lewat HTTP sungguhan
+
+Test yang oleh spec disebut paling penting di repo ini: dua tenant dengan data **yang sama** (alamat email yang sama, sengaja) dipastikan tidak pernah saling mencemari — di-provisioning sungguhan, login sungguhan, dijalankan sepenuhnya lewat router HTTP sungguhan yang dibangun Tugas 18. Tugas 5 sudah membuktikan `WithTenant` sendiri tidak bisa membocorkan `search_path` lintas rollback di layer database; test ini membuktikan jaminan yang sama berlaku lewat seluruh stack yang benar-benar diajak bicara client sungguhan.
+
+**Berkas:**
+- Test: `internal/server/tenant_isolation_test.go`
+
+**Antarmuka:**
+- Menggunakan semua yang dibangun di Tugas 5–18: tidak ada kode produksi baru, tugas ini murni test.
+
+- [ ] **Langkah 1: Tulis test-nya**
+
+Buat `internal/server/tenant_isolation_test.go`:
+```go
+package server_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	platformtenant "go-api-starter/internal/modules/platform/tenant"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	tenantrole "go-api-starter/internal/modules/tenant/role"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/server"
+	"go-api-starter/internal/testsupport"
+)
+
+func buildTestApp(t *testing.T) (*fiber.App, *platformtenant.Service) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	if err := migration.MigratePlatformUp(pool.DB); err != nil {
+		t.Fatalf("MigratePlatformUp: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec("TRUNCATE platform.tenants, platform.login_attempts CASCADE")
+	})
+
+	platformPool := testsupport.OpenTestPlatformDB(t)
+	db := database.NewDB(pool)
+	tokens := auth.NewTokenManager("integration-test-secret", 15*time.Minute)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, 5, 15*time.Minute)
+
+	tenantRepo := platformtenant.NewRepository(platformPool, pool.DB)
+	tenantResolver := middleware.NewTenantResolver(tenantRepo, time.Minute)
+	tenantSvc := platformtenant.NewService(tenantRepo, pool.DB, tenantResolver)
+
+	roleSvc := tenantrole.NewService(db)
+	permCache := middleware.NewPermissionCache(roleSvc, time.Minute)
+
+	platformAuthSvc := platformauth.NewService(platformPool, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	tenantAuthSvc := tenantauth.NewService(db, tenantRepo, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	userSvc := tenantuser.NewService(tenantuser.NewRepository(db))
+
+	deps := server.Dependencies{
+		Tokens:          tokens,
+		TenantResolver:  tenantResolver,
+		PermissionCache: permCache,
+		PlatformAuth:    platformauth.NewHandler(platformAuthSvc),
+		TenantAuth:      tenantauth.NewHandler(tenantAuthSvc),
+		TenantUser:      tenantuser.NewHandler(userSvc),
+	}
+	app := server.NewRouter(deps, []string{"http://localhost:5173"})
+	return app, tenantSvc
+}
+
+func doJSON(t *testing.T, app *fiber.App, method, path string, body any, token string) (*http.Response, map[string]any) {
+	t.Helper()
+	reader := bytes.NewReader(nil)
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := app.Test(req, -1) // -1: no timeout — these steps hit real Postgres
+	if err != nil {
+		t.Fatalf("app.Test %s %s: %v", method, path, err)
+	}
+	var parsed map[string]any
+	json.NewDecoder(resp.Body).Decode(&parsed)
+	return resp, parsed
+}
+
+func loginAsOwner(t *testing.T, app *fiber.App, tenantCode, email, password string) string {
+	t.Helper()
+	resp, body := doJSON(t, app, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"tenant_code": tenantCode, "email": email, "password": password,
+	}, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("login for %s failed: status=%d body=%v", tenantCode, resp.StatusCode, body)
+	}
+	data := body["data"].(map[string]any)
+	return data["access_token"].(string)
+}
+
+func TestTenantIsolation_AcrossTwoTenantsWithSimilarData(t *testing.T) {
+	app, tenantSvc := buildTestApp(t)
+	ctx := context.Background()
+
+	codeA := "acme_" + testsupport.RandomSchemaName()
+	codeB := "globex_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropTestSchema(t, codeA) })
+	t.Cleanup(func() { dropTestSchema(t, codeB) })
+
+	resA, err := tenantSvc.Provision(ctx, platformtenant.ProvisionInput{
+		Code: codeA, Name: "Acme Corp", OwnerEmail: "owner@acme.test",
+	})
+	if err != nil {
+		t.Fatalf("Provision tenant A: %v", err)
+	}
+	resB, err := tenantSvc.Provision(ctx, platformtenant.ProvisionInput{
+		Code: codeB, Name: "Globex Corp", OwnerEmail: "owner@globex.test",
+	})
+	if err != nil {
+		t.Fatalf("Provision tenant B: %v", err)
+	}
+
+	tokenA := loginAsOwner(t, app, codeA, "owner@acme.test", resA.OwnerPassword)
+	tokenB := loginAsOwner(t, app, codeB, "owner@globex.test", resB.OwnerPassword)
+
+	// Same email on purpose — if isolation ever breaks, a unique-index
+	// collision or cross-visibility here is exactly how it would surface.
+	respA, bodyA := doJSON(t, app, http.MethodPost, "/api/v1/users", map[string]string{
+		"email": "staff@example.com", "password": "correct-horse-battery", "name": "Staff A",
+	}, tokenA)
+	if respA.StatusCode != 201 {
+		t.Fatalf("create user in tenant A failed: status=%d body=%v", respA.StatusCode, bodyA)
+	}
+	staffAID := bodyA["data"].(map[string]any)["id"].(string)
+
+	respB, bodyB := doJSON(t, app, http.MethodPost, "/api/v1/users", map[string]string{
+		"email": "staff@example.com", "password": "correct-horse-battery", "name": "Staff B",
+	}, tokenB)
+	if respB.StatusCode != 201 {
+		t.Fatalf("create user in tenant B (same email, different tenant) failed: status=%d body=%v", respB.StatusCode, bodyB)
+	}
+
+	_, listA := doJSON(t, app, http.MethodGet, "/api/v1/users?limit=100", nil, tokenA)
+	assertNamesPresentAbsent(t, listA, []string{"Staff A"}, []string{"Staff B"})
+
+	_, listB := doJSON(t, app, http.MethodGet, "/api/v1/users?limit=100", nil, tokenB)
+	assertNamesPresentAbsent(t, listB, []string{"Staff B"}, []string{"Staff A"})
+
+	// The strongest check: tenant B, holding tenant A's own user ID,
+	// cannot fetch it — WithTenant scopes every query to the caller's
+	// schema regardless of which ID is asked for.
+	respCross, _ := doJSON(t, app, http.MethodGet, "/api/v1/users/"+staffAID, nil, tokenB)
+	if respCross.StatusCode != 404 {
+		t.Errorf("tenant B fetched tenant A's user by ID: status=%d, want 404", respCross.StatusCode)
+	}
+}
+
+func assertNamesPresentAbsent(t *testing.T, body map[string]any, present, absent []string) {
+	t.Helper()
+	data, ok := body["data"].([]any)
+	if !ok {
+		t.Fatalf("response has no data array: %v", body)
+	}
+	names := map[string]bool{}
+	for _, item := range data {
+		row := item.(map[string]any)
+		names[row["name"].(string)] = true
+	}
+	for _, want := range present {
+		if !names[want] {
+			t.Errorf("expected %q in list, got names: %v", want, names)
+		}
+	}
+	for _, unwanted := range absent {
+		if names[unwanted] {
+			t.Errorf("found %q in list — cross-tenant leak, got names: %v", unwanted, names)
+		}
+	}
+}
+
+func dropTestSchema(t *testing.T, schemaName string) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	pool.Exec(`DROP SCHEMA IF EXISTS "` + schemaName + `" CASCADE`)
+}
+```
+
+- [ ] **Langkah 2: Jalankan test-nya**
+
+Jalankan: `go test ./internal/server/... -run TenantIsolation -v`
+Hasil: PASS. Test ini lambat (dua kali provisioning penuh, masing-masing menjalankan empat migrasi tenant) — beberapa detik itu wajar.
+
+Kalau gagal, **berhenti dan perlakukan sebagai bug berprioritas tertinggi di seluruh codebase** — ini satu-satunya jaminan yang jadi alasan seluruh arsitektur ini ada.
+
+- [ ] **Langkah 3: Jalankan seluruh test suite**
+
+Jalankan: `go test ./... -v`
+Hasil: setiap test yang ditulis di Tugas 2–20 lolos.
+
+- [ ] **Langkah 4: Commit**
+
+```bash
+git add internal/server/tenant_isolation_test.go
+git commit -m "test: end-to-end tenant isolation across two tenants with identical data"
+```
+
+---
