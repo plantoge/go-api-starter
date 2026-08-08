@@ -7071,3 +7071,311 @@ git commit -m "feat: tenant user module — the example CRUD pattern for future 
 ```
 
 ---
+
+### Tugas 18: Wiring server HTTP — router, health check, graceful shutdown, `main.go`
+
+Test perilaku rute secara penuh (auth → RBAC → isolasi tenant, end-to-end lewat HTTP sungguhan) sengaja ditinggalkan untuk integration test Tugas 20, yang menjalankan router yang persis sama ini. Test milik tugas ini sendiri hanya mencakup endpoint health, yang cukup sederhana untuk diverifikasi terisolasi; sisanya diverifikasi lewat build dan smoke test manual di Langkah 5.
+
+**Berkas:**
+- Buat: `internal/server/router.go`
+- Buat: `internal/server/health.go`
+- Buat: `cmd/api/main.go`
+- Test: `internal/server/health_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - Struct `server.Dependencies` — setiap handler dan cache yang dibutuhkan `NewRouter`.
+  - `server.NewRouter(deps Dependencies, corsOrigins []string) *fiber.App`
+  - `server.RegisterHealth(app *fiber.App, pool *sqlx.DB)`
+  - Rute: `POST /api/v1/admin/auth/{login,refresh,logout}`, `POST /api/v1/auth/{login,refresh,logout}`, `POST|GET /api/v1/users`, `GET|PATCH|DELETE /api/v1/users/:id` (kelima terakhir di belakang `RequireTenant` + `RequirePermission`).
+
+- [ ] **Langkah 1: Tulis test health yang gagal**
+
+Buat `internal/server/health_test.go`:
+```go
+package server_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/server"
+	"go-api-starter/internal/testsupport"
+)
+
+func TestHealth_AlwaysOK(t *testing.T) {
+	app := fiber.New()
+	pool := testsupport.OpenTestDB(t)
+	server.RegisterHealth(app, pool)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/health", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestHealthReady_OKWhenDBReachable(t *testing.T) {
+	app := fiber.New()
+	pool := testsupport.OpenTestDB(t)
+	server.RegisterHealth(app, pool)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/server/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan health.go**
+
+Buat `internal/server/health.go`:
+```go
+package server
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/jmoiron/sqlx"
+)
+
+// RegisterHealth attaches liveness and readiness endpoints. /health never
+// touches the database — it only proves the process is alive and
+// responding. /health/ready additionally pings the database, so a load
+// balancer or orchestrator can tell "running" apart from "actually able to
+// serve requests."
+func RegisterHealth(app *fiber.App, pool *sqlx.DB) {
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+	app.Get("/health/ready", func(c *fiber.Ctx) error {
+		if err := pool.PingContext(c.Context()); err != nil {
+			return c.Status(503).JSON(fiber.Map{"status": "not ready"})
+		}
+		return c.JSON(fiber.Map{"status": "ready"})
+	})
+}
+```
+
+- [ ] **Langkah 4: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/server/... -v`
+Hasil: PASS — kedua test lolos.
+
+- [ ] **Langkah 5: Implementasikan router.go**
+
+Buat `internal/server/router.go`:
+```go
+package server
+
+import (
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/middleware"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/permission"
+	"go-api-starter/internal/response"
+)
+
+// Dependencies collects every constructed handler and cache NewRouter
+// needs. Built once in cmd/api/main.go, kept here as a single struct so
+// main.go's job stays "construct dependencies, hand them to NewRouter"
+// rather than router logic and dependency construction tangled together.
+type Dependencies struct {
+	Tokens          *auth.TokenManager
+	TenantResolver  *middleware.TenantResolver
+	PermissionCache *middleware.PermissionCache
+	PlatformAuth    *platformauth.Handler
+	TenantAuth      *tenantauth.Handler
+	TenantUser      *tenantuser.Handler
+}
+
+// NewRouter builds the full Fiber app: global middleware, then every route
+// under /api/v1. Health endpoints are registered separately via
+// RegisterHealth (main.go calls both).
+func NewRouter(deps Dependencies, corsOrigins []string) *fiber.App {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return response.Error(c, middleware.RequestIDFromCtx(c), err)
+		},
+	})
+
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.Recover())
+	app.Use(middleware.CORS(corsOrigins))
+
+	api := app.Group("/api/v1")
+
+	admin := api.Group("/admin")
+	admin.Post("/auth/login", deps.PlatformAuth.Login)
+	admin.Post("/auth/refresh", deps.PlatformAuth.Refresh)
+	admin.Post("/auth/logout", deps.PlatformAuth.Logout)
+
+	api.Post("/auth/login", deps.TenantAuth.Login)
+	api.Post("/auth/refresh", deps.TenantAuth.Refresh)
+	api.Post("/auth/logout", deps.TenantAuth.Logout)
+
+	tenantAPI := api.Group("", middleware.RequireTenant(deps.Tokens, deps.TenantResolver))
+
+	users := tenantAPI.Group("/users")
+	users.Post("/", middleware.RequirePermission(permission.UserCreate, deps.PermissionCache), deps.TenantUser.Create)
+	users.Get("/", middleware.RequirePermission(permission.UserView, deps.PermissionCache), deps.TenantUser.List)
+	users.Get("/:id", middleware.RequirePermission(permission.UserView, deps.PermissionCache), deps.TenantUser.Get)
+	users.Patch("/:id", middleware.RequirePermission(permission.UserUpdate, deps.PermissionCache), deps.TenantUser.Update)
+	users.Delete("/:id", middleware.RequirePermission(permission.UserDelete, deps.PermissionCache), deps.TenantUser.Delete)
+
+	return app
+}
+```
+
+- [ ] **Langkah 6: Implementasikan main.go**
+
+Buat `cmd/api/main.go`:
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	platformtenant "go-api-starter/internal/modules/platform/tenant"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	tenantrole "go-api-starter/internal/modules/tenant/role"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/server"
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("config", "error", err)
+		os.Exit(1)
+	}
+
+	pool, err := database.NewPool(cfg.DB)
+	if err != nil {
+		slog.Error("db pool", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	platformPool, err := database.NewPlatformPool(cfg.DB)
+	if err != nil {
+		slog.Error("platform db pool", "error", err)
+		os.Exit(1)
+	}
+	defer platformPool.Close()
+
+	db := database.NewDB(pool)
+	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.AccessTokenTTL)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, cfg.Login.MaxAttempts, cfg.Login.AttemptWindow)
+
+	// tenantRepo satisfies both middleware.TenantLookup (FindByID) and
+	// tenantauth.TenantLookup (FindRecordByCode) — one repository, two
+	// different lookup shapes for two different callers.
+	tenantRepo := platformtenant.NewRepository(platformPool, pool.DB)
+	tenantResolver := middleware.NewTenantResolver(tenantRepo, time.Minute)
+
+	roleSvc := tenantrole.NewService(db)
+	permCache := middleware.NewPermissionCache(roleSvc, time.Minute)
+
+	platformAuthSvc := platformauth.NewService(platformPool, tokens, cfg.JWT.AccessTokenTTL, cfg.JWT.RefreshTokenTTL, rateLimiter)
+	tenantAuthSvc := tenantauth.NewService(db, tenantRepo, tokens, cfg.JWT.AccessTokenTTL, cfg.JWT.RefreshTokenTTL, rateLimiter)
+
+	userSvc := tenantuser.NewService(tenantuser.NewRepository(db))
+
+	deps := server.Dependencies{
+		Tokens:          tokens,
+		TenantResolver:  tenantResolver,
+		PermissionCache: permCache,
+		PlatformAuth:    platformauth.NewHandler(platformAuthSvc),
+		TenantAuth:      tenantauth.NewHandler(tenantAuthSvc),
+		TenantUser:      tenantuser.NewHandler(userSvc),
+	}
+	app := server.NewRouter(deps, cfg.CORS.AllowedOrigins)
+	server.RegisterHealth(app, pool)
+
+	go func() {
+		addr := fmt.Sprintf(":%d", cfg.App.Port)
+		slog.Info("listening", "addr", addr)
+		if err := app.Listen(addr); err != nil {
+			slog.Error("server stopped", "error", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.App.ShutdownTimeout)
+	defer cancel()
+	if err := app.ShutdownWithContext(ctx); err != nil {
+		slog.Error("graceful shutdown failed", "error", err)
+	}
+}
+```
+
+- [ ] **Langkah 7: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 8: Smoke-test manual seluruh stack**
+
+Jalankan:
+```bash
+go run ./cmd/cli migrate platform up
+go run ./cmd/cli admin create --email=you@example.com --name="Your Name"
+go run ./cmd/cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=owner@acmecorp.test
+go run ./cmd/api
+```
+Di terminal lain:
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/health/ready
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_code":"acme_corp","email":"owner@acmecorp.test","password":"<password owner dari tenant create>"}'
+```
+Hasil: `/health` dan `/health/ready` mengembalikan `{"status":"ok"}` / `{"status":"ready"}`; login mengembalikan `access_token`, `refresh_token`, `expires_in`. Salin `access_token` dan pastikan RBAC bekerja — owner (lewat bypass `is_system`) bisa melihat daftar user:
+```bash
+curl http://localhost:8080/api/v1/users -H "Authorization: Bearer <access_token>"
+```
+Hasil: `{"success":true,"data":[...],"meta":{...}}` — minimal berisi user owner yang dibuat saat provisioning.
+
+- [ ] **Langkah 9: Commit**
+
+```bash
+git add internal/server cmd/api
+git commit -m "feat: HTTP server wiring — router, health checks, graceful shutdown"
+```
+
+---
