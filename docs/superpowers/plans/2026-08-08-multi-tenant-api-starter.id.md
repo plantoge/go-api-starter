@@ -4807,3 +4807,789 @@ git commit -m "feat: permission constants and cli permission sync command"
 ```
 
 ---
+
+### Tugas 14: Modul tenant platform — provisioning, CRUD, CLI
+
+**Catatan desain — tanpa `handler.go`:** spec dengan tegas menaruh endpoint HTTP self-service untuk provisioning **di luar cakupan** starter ini ("endpoint admin self-service ... menyusul"). Tugas ini membangun `Service` yang bisa dipakai ulang, yang nanti dipanggil endpoint tersebut, dan untuk sekarang mengeksposnya hanya lewat CLI. Karena itu `modules/platform/tenant/` tidak punya `handler.go` — itu menyusul nanti, disambungkan ke `Service` yang sama ini, tanpa perubahan apa pun padanya.
+
+**Berkas:**
+- Buat: `internal/modules/platform/tenant/model.go`
+- Buat: `internal/modules/platform/tenant/dto.go`
+- Buat: `internal/modules/platform/tenant/repository.go`
+- Buat: `internal/modules/platform/tenant/service.go`
+- Buat: `cmd/cli/commands/tenant.go`
+- Test: `internal/modules/platform/tenant/service_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `tenant.Tenant` (struct baris DB), `tenant.ProvisionInput`, `tenant.ProvisionResult`, `tenant.TenantView`
+  - `tenant.NewRepository(platformDB *sqlx.DB, rawDB *sql.DB) *Repository`
+  - `(r *Repository) FindByID(ctx, uuid.UUID) (middleware.TenantRecord, error)` — **mengimplementasikan `middleware.TenantLookup`** (Tugas 11).
+  - `(r *Repository) Create/FindByCode/FindByCodeIncludingDeleted/List/UpdateStatus/SoftDelete`
+  - `tenant.NewService(repo *Repository, rawDB *sql.DB, resolver *middleware.TenantResolver) *Service`
+  - `(s *Service) Provision(ctx, ProvisionInput) (ProvisionResult, error)`
+  - `(s *Service) Suspend/Activate/Delete(ctx, code string) error`
+  - `(s *Service) Purge(ctx, code string) error`
+  - `(s *Service) List(ctx, pagination.Params) ([]TenantView, response.Meta, error)`
+  - CLI: `cli tenant create --code= --name= --owner-email=`, `cli tenant list`, `cli tenant suspend --code=`, `cli tenant activate --code=`, `cli tenant delete --code=`, `cli tenant purge --code= --confirm`
+
+- [ ] **Langkah 1: Tulis test yang gagal**
+
+Buat `internal/modules/platform/tenant/service_test.go`:
+```go
+package tenant_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+	platformtenant "go-api-starter/internal/modules/platform/tenant"
+	"go-api-starter/internal/testsupport"
+)
+
+// setupTenantService gives every test in this file a fresh Service wired
+// to real platform.tenants + a raw *sql.DB for provisioning transactions.
+func setupTenantService(t *testing.T) (*platformtenant.Service, *platformtenant.Repository) {
+	t.Helper()
+	rawPool := testsupport.OpenTestDB(t)
+	if err := migration.MigratePlatformUp(rawPool.DB); err != nil {
+		t.Fatalf("MigratePlatformUp: %v", err)
+	}
+	t.Cleanup(func() { rawPool.Exec("TRUNCATE platform.tenants CASCADE") })
+
+	platformDB := testsupport.OpenTestPlatformDB(t)
+	repo := platformtenant.NewRepository(platformDB, rawPool.DB)
+	resolver := middleware.NewTenantResolver(repo, time.Minute)
+	svc := platformtenant.NewService(repo, rawPool.DB, resolver)
+	return svc, repo
+}
+
+func TestProvision_CreatesActiveTenantWithOwner(t *testing.T) {
+	svc, _ := setupTenantService(t)
+	ctx := context.Background()
+	code := "acme_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropSchemaIfExists(t, code) })
+
+	result, err := svc.Provision(ctx, platformtenant.ProvisionInput{
+		Code: code, Name: "Acme Test", OwnerEmail: "owner@example.com",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if result.Tenant.Status != "active" {
+		t.Errorf("Tenant.Status = %q, want active", result.Tenant.Status)
+	}
+	if result.OwnerPassword == "" {
+		t.Error("OwnerPassword is empty")
+	}
+}
+
+func TestProvision_DuplicateCode_ReturnsConflict(t *testing.T) {
+	svc, _ := setupTenantService(t)
+	ctx := context.Background()
+	code := "dup_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropSchemaIfExists(t, code) })
+
+	if _, err := svc.Provision(ctx, platformtenant.ProvisionInput{Code: code, Name: "First", OwnerEmail: "a@example.com"}); err != nil {
+		t.Fatalf("first Provision: %v", err)
+	}
+	if _, err := svc.Provision(ctx, platformtenant.ProvisionInput{Code: code, Name: "Second", OwnerEmail: "b@example.com"}); err == nil {
+		t.Fatal("second Provision with the same code succeeded, want conflict")
+	}
+}
+
+func TestSuspendAndActivate_ChangeStatus(t *testing.T) {
+	svc, repo := setupTenantService(t)
+	ctx := context.Background()
+	code := "susp_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropSchemaIfExists(t, code) })
+	if _, err := svc.Provision(ctx, platformtenant.ProvisionInput{Code: code, Name: "X", OwnerEmail: "x@example.com"}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	if err := svc.Suspend(ctx, code); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	t2, err := repo.FindByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("FindByCode: %v", err)
+	}
+	if t2.Status != "suspended" {
+		t.Errorf("Status = %q, want suspended", t2.Status)
+	}
+
+	if err := svc.Activate(ctx, code); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	t3, err := repo.FindByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("FindByCode: %v", err)
+	}
+	if t3.Status != "active" {
+		t.Errorf("Status = %q, want active", t3.Status)
+	}
+}
+
+func TestPurge_RefusesBeforeThirtyDays(t *testing.T) {
+	svc, _ := setupTenantService(t)
+	ctx := context.Background()
+	code := "purge1_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropSchemaIfExists(t, code) })
+	if _, err := svc.Provision(ctx, platformtenant.ProvisionInput{Code: code, Name: "X", OwnerEmail: "x@example.com"}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if err := svc.Delete(ctx, code); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if err := svc.Purge(ctx, code); err == nil {
+		t.Fatal("Purge() succeeded immediately after soft delete, want refusal (< 30 days)")
+	}
+}
+
+func TestFindByID_ReportsSchemaVersion(t *testing.T) {
+	svc, repo := setupTenantService(t)
+	ctx := context.Background()
+	code := "ver_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropSchemaIfExists(t, code) })
+	result, err := svc.Provision(ctx, platformtenant.ProvisionInput{Code: code, Name: "X", OwnerEmail: "x@example.com"})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	tenantID, err := uuid.Parse(result.Tenant.ID)
+	if err != nil {
+		t.Fatalf("parse tenant id: %v", err)
+	}
+	record, err := repo.FindByID(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if record.SchemaVersion != migration.LatestTenantVersion() {
+		t.Errorf("SchemaVersion = %d, want %d (freshly provisioned tenant should be at the latest version)",
+			record.SchemaVersion, migration.LatestTenantVersion())
+	}
+	if record.SchemaDirty {
+		t.Error("SchemaDirty = true for a freshly provisioned tenant")
+	}
+}
+
+func dropSchemaIfExists(t *testing.T, schemaName string) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	pool.Exec(`DROP SCHEMA IF EXISTS "` + schemaName + `" CASCADE`)
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/modules/platform/tenant/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan model.go dan dto.go**
+
+Buat `internal/modules/platform/tenant/model.go`:
+```go
+package tenant
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type Tenant struct {
+	ID          uuid.UUID  `db:"id"`
+	Code        string     `db:"code"`
+	Name        string     `db:"name"`
+	SchemaName  string     `db:"schema_name"`
+	Status      string     `db:"status"`
+	SuspendedAt *time.Time `db:"suspended_at"`
+	CreatedAt   time.Time  `db:"created_at"`
+	UpdatedAt   time.Time  `db:"updated_at"`
+	DeletedAt   *time.Time `db:"deleted_at"`
+}
+```
+
+Buat `internal/modules/platform/tenant/dto.go`:
+```go
+package tenant
+
+type ProvisionInput struct {
+	Code       string `json:"code" validate:"required,min=3,max=50"`
+	Name       string `json:"name" validate:"required"`
+	OwnerEmail string `json:"owner_email" validate:"required,email"`
+}
+
+type ProvisionResult struct {
+	Tenant        TenantView `json:"tenant"`
+	OwnerPassword string     `json:"owner_password"`
+}
+
+type TenantView struct {
+	ID     string `json:"id"`
+	Code   string `json:"code"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+```
+
+- [ ] **Langkah 4: Implementasikan repository.go**
+
+Buat `internal/modules/platform/tenant/repository.go`:
+```go
+package tenant
+
+import (
+	"context"
+	"database/sql"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+)
+
+type Repository struct {
+	db    *sqlx.DB // platform-pinned pool, for normal CRUD
+	rawDB *sql.DB  // unqualified connection, for schema-scoped migration version checks
+}
+
+func NewRepository(platformDB *sqlx.DB, rawDB *sql.DB) *Repository {
+	return &Repository{db: platformDB, rawDB: rawDB}
+}
+
+func (r *Repository) FindByCode(ctx context.Context, code string) (Tenant, error) {
+	var t Tenant
+	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE code = $1 AND deleted_at IS NULL`, code)
+	if err == sql.ErrNoRows {
+		return Tenant{}, apperror.NotFound("tenant tidak ditemukan")
+	}
+	if err != nil {
+		return Tenant{}, apperror.Internal(err)
+	}
+	return t, nil
+}
+
+func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string) (Tenant, error) {
+	var t Tenant
+	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE code = $1`, code)
+	if err == sql.ErrNoRows {
+		return Tenant{}, apperror.NotFound("tenant tidak ditemukan")
+	}
+	if err != nil {
+		return Tenant{}, apperror.Internal(err)
+	}
+	return t, nil
+}
+
+// FindByID implements middleware.TenantLookup: it reports both the
+// tenant's platform-side status and its schema's migration version in one
+// call, because RequireTenant needs both to decide whether a request may
+// proceed, and both are cached together under the same TTL.
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.TenantRecord, error) {
+	var t Tenant
+	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL`, id)
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.NotFound("tenant tidak ditemukan")
+	}
+
+	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
+
+	return middleware.TenantRecord{
+		TenantID: t.ID, SchemaName: t.SchemaName, Status: t.Status,
+		SchemaVersion: version, SchemaDirty: dirty,
+	}, nil
+}
+
+func (r *Repository) List(ctx context.Context, limit, offset int, orderBy string) ([]Tenant, int, error) {
+	var tenants []Tenant
+	query := `SELECT * FROM tenants WHERE deleted_at IS NULL ORDER BY ` + orderBy + ` LIMIT $1 OFFSET $2`
+	if err := r.db.SelectContext(ctx, &tenants, query, limit, offset); err != nil {
+		return nil, 0, apperror.Internal(err)
+	}
+	var total int
+	if err := r.db.GetContext(ctx, &total, `SELECT count(*) FROM tenants WHERE deleted_at IS NULL`); err != nil {
+		return nil, 0, apperror.Internal(err)
+	}
+	return tenants, total, nil
+}
+
+func (r *Repository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, suspendedAt *time.Time) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE tenants SET status = $2, suspended_at = $3 WHERE id = $1`, id, status, suspendedAt)
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+
+func (r *Repository) SoftDelete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE tenants SET deleted_at = now() WHERE id = $1`, id)
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+```
+
+- [ ] **Langkah 5: Implementasikan service.go**
+
+Buat `internal/modules/platform/tenant/service.go`:
+```go
+package tenant
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/apperror"
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+	"go-api-starter/internal/pagination"
+	"go-api-starter/internal/permission"
+	"go-api-starter/internal/response"
+)
+
+type Service struct {
+	repo     *Repository
+	rawDB    *sql.DB
+	resolver *middleware.TenantResolver
+}
+
+func NewService(repo *Repository, rawDB *sql.DB, resolver *middleware.TenantResolver) *Service {
+	return &Service{repo: repo, rawDB: rawDB, resolver: resolver}
+}
+
+var codeRe = regexp.MustCompile(`^[a-z][a-z0-9_]{2,49}$`)
+
+func normalizeCode(raw string) (string, error) {
+	code := strings.ToLower(strings.TrimSpace(raw))
+	code = strings.ReplaceAll(code, "-", "_")
+	code = strings.ReplaceAll(code, " ", "_")
+	if !codeRe.MatchString(code) {
+		return "", apperror.Validation(map[string][]string{
+			"code": {"kode tenant harus 3-50 karakter huruf kecil, angka, dan garis bawah"},
+		})
+	}
+	return code, nil
+}
+
+func randomPassword() (string, error) {
+	plain, _, err := appauth.GenerateRefreshToken()
+	if err != nil {
+		return "", err
+	}
+	return plain[:20], nil
+}
+
+// Provision creates a brand new tenant end to end: validates the code,
+// creates its schema, applies every tenant migration, seeds permissions
+// and the owner role, creates the owner user, and marks the tenant active
+// — all inside one *sql.Tx, so a failure at any step leaves nothing behind
+// (PostgreSQL DDL is transactional, so even CREATE SCHEMA rolls back).
+//
+// Tenant migrations are applied by reading the same files golang-migrate
+// itself uses (migration.TenantMigrationFiles) and exec'ing their SQL
+// directly against this transaction, since golang-migrate manages its own
+// connection and can't join a caller's transaction. Afterwards this writes
+// schema_migrations by hand, in the exact format golang-migrate uses, so
+// `cli migrate tenant up`/`status` (Task 7) stay accurate for this tenant.
+func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionResult, error) {
+	code, err := normalizeCode(in.Code)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	if !database.ValidSchemaName(code) {
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("normalized code %q is not a valid schema name", code))
+	}
+
+	tx, err := s.rawDB.BeginTx(ctx, nil)
+	if err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	defer tx.Rollback()
+
+	tenantID := uuid.New()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO platform.tenants (id, code, name, schema_name, status) VALUES ($1, $2, $3, $4, 'provisioning')`,
+		tenantID, code, in.Name, code); err != nil {
+		return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+	}
+
+	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA "`+code+`"`); err != nil {
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("create schema: %w", err))
+	}
+	if _, err := tx.ExecContext(ctx, `SET LOCAL search_path TO "`+code+`"`); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+
+	files, err := migration.TenantMigrationFiles()
+	if err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	var latestVersion uint
+	for _, f := range files {
+		if _, err := tx.ExecContext(ctx, f.SQL); err != nil {
+			return ProvisionResult{}, apperror.Internal(fmt.Errorf("apply tenant migration %d: %w", f.Version, err))
+		}
+		latestVersion = f.Version
+	}
+	if _, err := tx.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (version bigint primary key, dirty boolean not null)`); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO schema_migrations (version, dirty) VALUES ($1, false)`, latestVersion); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+
+	for _, permCode := range permission.All {
+		group := strings.SplitN(permCode, ".", 2)[0]
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO permissions (id, code, "group") VALUES ($1, $2, $3)`,
+			uuid.New(), permCode, group); err != nil {
+			return ProvisionResult{}, apperror.Internal(err)
+		}
+	}
+
+	ownerRoleID := uuid.New()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO roles (id, name, is_system) VALUES ($1, 'owner', true)`, ownerRoleID); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	// owner gets every permission via the is_system bypass at check time
+	// (Task 15), not rows in role_permissions — no seed loop needed here.
+
+	ownerID := uuid.New()
+	ownerPassword, err := randomPassword()
+	if err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	ownerHash, err := appauth.HashPassword(ownerPassword)
+	if err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, $2, $3, 'Owner', true)`,
+		ownerID, in.OwnerEmail, ownerHash); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO user_roles (user_id, role_id, created_at) VALUES ($1, $2, now())`, ownerID, ownerRoleID); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE platform.tenants SET status = 'active' WHERE id = $1`, tenantID); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return ProvisionResult{}, apperror.Internal(err)
+	}
+
+	return ProvisionResult{
+		Tenant:        TenantView{ID: tenantID.String(), Code: code, Name: in.Name, Status: "active"},
+		OwnerPassword: ownerPassword,
+	}, nil
+}
+
+func (s *Service) Suspend(ctx context.Context, code string) error {
+	t, err := s.repo.FindByCode(ctx, code)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if err := s.repo.UpdateStatus(ctx, t.ID, "suspended", &now); err != nil {
+		return err
+	}
+	s.resolver.Invalidate(t.ID)
+	return nil
+}
+
+func (s *Service) Activate(ctx context.Context, code string) error {
+	t, err := s.repo.FindByCode(ctx, code)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.UpdateStatus(ctx, t.ID, "active", nil); err != nil {
+		return err
+	}
+	s.resolver.Invalidate(t.ID)
+	return nil
+}
+
+func (s *Service) Delete(ctx context.Context, code string) error {
+	t, err := s.repo.FindByCode(ctx, code)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.SoftDelete(ctx, t.ID); err != nil {
+		return err
+	}
+	s.resolver.Invalidate(t.ID)
+	return nil
+}
+
+const purgeMinAge = 30 * 24 * time.Hour
+
+// Purge permanently drops a soft-deleted tenant's schema. It refuses
+// unless the tenant has been soft-deleted for at least purgeMinAge — DROP
+// SCHEMA can't be undone, and this delay is the only safety net against a
+// mistyped tenant code destroying a client's data outright.
+func (s *Service) Purge(ctx context.Context, code string) error {
+	t, err := s.repo.FindByCodeIncludingDeleted(ctx, code)
+	if err != nil {
+		return err
+	}
+	if t.DeletedAt == nil {
+		return apperror.Conflict("tenant belum dihapus (soft delete) — hapus dulu sebelum purge")
+	}
+	if time.Since(*t.DeletedAt) < purgeMinAge {
+		return apperror.Conflict("tenant baru bisa di-purge 30 hari setelah dihapus")
+	}
+	if !database.ValidSchemaName(t.SchemaName) {
+		return apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
+	}
+	if _, err := s.rawDB.ExecContext(ctx, `DROP SCHEMA "`+t.SchemaName+`" CASCADE`); err != nil {
+		return apperror.Internal(err)
+	}
+	s.resolver.Invalidate(t.ID)
+	return nil
+}
+
+var sortable = map[string]string{
+	"created_at": "created_at",
+	"code":       "code",
+	"name":       "name",
+}
+
+func (s *Service) List(ctx context.Context, p pagination.Params) ([]TenantView, response.Meta, error) {
+	tenants, total, err := s.repo.List(ctx, p.Limit, p.Offset(), p.OrderByClause(sortable))
+	if err != nil {
+		return nil, response.Meta{}, err
+	}
+	views := make([]TenantView, len(tenants))
+	for i, t := range tenants {
+		views[i] = TenantView{ID: t.ID.String(), Code: t.Code, Name: t.Name, Status: t.Status}
+	}
+	return views, pagination.BuildMeta(p.Page, p.Limit, total), nil
+}
+```
+
+- [ ] **Langkah 6: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/modules/platform/tenant/... -v`
+Hasil: PASS — kelima test lolos. (Test ini lambat — masing-masing melakukan provisioning schema sungguhan dengan empat migrasi tenant — total beberapa detik itu wajar.)
+
+- [ ] **Langkah 7: Tulis perintah CLI tenant**
+
+Buat `cmd/cli/commands/tenant.go`:
+```go
+package commands
+
+import (
+	"context"
+	"flag"
+	"fmt"
+
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	platformtenant "go-api-starter/internal/modules/platform/tenant"
+	"go-api-starter/internal/pagination"
+)
+
+func init() {
+	Register("tenant create", cmdTenantCreate)
+	Register("tenant list", cmdTenantList)
+	Register("tenant suspend", cmdTenantSuspend)
+	Register("tenant activate", cmdTenantActivate)
+	Register("tenant delete", cmdTenantDelete)
+	Register("tenant purge", cmdTenantPurge)
+}
+
+func newTenantService(cfg *config.Config) (*platformtenant.Service, func(), error) {
+	platformDB, err := database.NewPlatformPool(cfg.DB)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect (platform pool): %w", err)
+	}
+	rawDB, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		platformDB.Close()
+		return nil, nil, fmt.Errorf("connect (raw pool): %w", err)
+	}
+
+	repo := platformtenant.NewRepository(platformDB, rawDB)
+	resolver := middleware.NewTenantResolver(repo, 0) // CLI never needs caching — one-shot process
+	svc := platformtenant.NewService(repo, rawDB, resolver)
+
+	cleanup := func() {
+		platformDB.Close()
+		rawDB.Close()
+	}
+	return svc, cleanup, nil
+}
+
+func cmdTenantCreate(args []string) error {
+	fs := flag.NewFlagSet("tenant create", flag.ExitOnError)
+	code := fs.String("code", "", "tenant code (required)")
+	name := fs.String("name", "", "tenant name (required)")
+	ownerEmail := fs.String("owner-email", "", "first owner's email (required)")
+	fs.Parse(args)
+
+	if *code == "" || *name == "" || *ownerEmail == "" {
+		return fmt.Errorf("--code, --name, and --owner-email are all required")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	svc, cleanup, err := newTenantService(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	result, err := svc.Provision(context.Background(), platformtenant.ProvisionInput{
+		Code: *code, Name: *name, OwnerEmail: *ownerEmail,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("tenant berhasil di-provisioning:")
+	fmt.Println("  code:          ", result.Tenant.Code)
+	fmt.Println("  owner email:   ", *ownerEmail)
+	fmt.Println("  owner password:", result.OwnerPassword)
+	fmt.Println("(password ini hanya ditampilkan sekali — ganti setelah login pertama)")
+	return nil
+}
+
+func cmdTenantList(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	svc, cleanup, err := newTenantService(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	views, _, err := svc.List(context.Background(), pagination.Params{
+		Page: 1, Limit: 100, Sort: "created_at", Order: "desc",
+	})
+	if err != nil {
+		return err
+	}
+	for _, v := range views {
+		fmt.Printf("%-20s %-30s %s\n", v.Code, v.Name, v.Status)
+	}
+	return nil
+}
+
+func cmdTenantSuspend(args []string) error  { return tenantStatusCommand(args, "tenant suspend", (*platformtenant.Service).Suspend) }
+func cmdTenantActivate(args []string) error { return tenantStatusCommand(args, "tenant activate", (*platformtenant.Service).Activate) }
+func cmdTenantDelete(args []string) error   { return tenantStatusCommand(args, "tenant delete", (*platformtenant.Service).Delete) }
+
+func tenantStatusCommand(args []string, name string, action func(*platformtenant.Service, context.Context, string) error) error {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	code := fs.String("code", "", "tenant code (required)")
+	fs.Parse(args)
+	if *code == "" {
+		return fmt.Errorf("--code is required")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	svc, cleanup, err := newTenantService(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if err := action(svc, context.Background(), *code); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+func cmdTenantPurge(args []string) error {
+	fs := flag.NewFlagSet("tenant purge", flag.ExitOnError)
+	code := fs.String("code", "", "tenant code (required)")
+	confirm := fs.Bool("confirm", false, "required acknowledgement — this is irreversible")
+	fs.Parse(args)
+	if *code == "" {
+		return fmt.Errorf("--code is required")
+	}
+	if !*confirm {
+		return fmt.Errorf("pass --confirm to acknowledge this permanently deletes the tenant's data")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	svc, cleanup, err := newTenantService(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if err := svc.Purge(context.Background(), *code); err != nil {
+		return err
+	}
+	fmt.Println("tenant berhasil di-purge secara permanen")
+	return nil
+}
+```
+
+- [ ] **Langkah 8: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 9: Verifikasi manual end-to-end**
+
+Jalankan:
+```bash
+go run ./cmd/cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=owner@acmecorp.test
+go run ./cmd/cli tenant list
+go run ./cmd/cli tenant suspend --code=acme_corp
+go run ./cmd/cli tenant list
+go run ./cmd/cli tenant activate --code=acme_corp
+```
+Hasil: tiap perintah mencetak hasil yang masuk akal; `tenant list` menunjukkan status berubah antara `active` dan `suspended`.
+
+- [ ] **Langkah 10: Commit**
+
+```bash
+git add internal/modules/platform/tenant cmd/cli/commands/tenant.go
+git commit -m "feat: tenant provisioning service, lifecycle management, and cli tenant commands"
+```
+
+---
