@@ -1630,3 +1630,486 @@ git commit -m "feat: tenant-scoped DB pool with SET LOCAL search_path isolation"
 ```
 
 ---
+
+### Tugas 6: Skeleton CLI + migration runner + migrasi platform
+
+**Catatan desain soal pembuatan schema:** driver postgres milik golang-migrate mengharap schema tujuan sudah ada saat dia dibuka (dia langsung bikin tabel pelacak `schema_migrations` di situ, dan tidak akan membuat schema-nya sendiri). Jadi pembuatan schema **bukan** migration file tersendiri — `MigratePlatformUp` menjalankan `CREATE SCHEMA IF NOT EXISTS platform` langsung sebelum menyerahkan kendali ke golang-migrate, dan pembuatan schema tenant dilakukan eksplisit saat provisioning (Tugas 14), sebelum migrasi tenant mana pun dijalankan.
+
+**Berkas:**
+- Buat: `cmd/cli/main.go`
+- Buat: `cmd/cli/commands/registry.go`
+- Buat: `cmd/cli/commands/migrate.go`
+- Buat: `internal/migration/runner.go`
+- Buat: `internal/migration/platform_fs.go`
+- Buat: `internal/migration/platform/000001_create_updated_at_trigger_fn.up.sql`
+- Buat: `internal/migration/platform/000001_create_updated_at_trigger_fn.down.sql`
+- Buat: `internal/migration/platform/000002_create_tenants_table.up.sql`
+- Buat: `internal/migration/platform/000002_create_tenants_table.down.sql`
+- Buat: `internal/migration/platform/000003_create_platform_users_table.up.sql`
+- Buat: `internal/migration/platform/000003_create_platform_users_table.down.sql`
+- Buat: `internal/migration/platform/000004_create_platform_refresh_tokens_table.up.sql`
+- Buat: `internal/migration/platform/000004_create_platform_refresh_tokens_table.down.sql`
+- Buat: `internal/migration/platform/000005_create_login_attempts_table.up.sql`
+- Buat: `internal/migration/platform/000005_create_login_attempts_table.down.sql`
+- Test: `internal/migration/runner_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `commands.Register(name string, h commands.Handler)`, `commands.Lookup(name string) (Handler, bool)`, `commands.Names() []string`, tipe `Handler func(args []string) error`
+  - `migration.MigratePlatformUp(db *sql.DB) error`
+  - `migration.LatestPlatformVersion() uint`
+  - Perintah CLI: `cli migrate platform up`
+
+- [ ] **Langkah 1: Tambah golang-migrate**
+
+Jalankan: `go get github.com/golang-migrate/migrate/v4`
+
+- [ ] **Langkah 2: Tulis registry perintah CLI**
+
+Buat `cmd/cli/commands/registry.go`:
+```go
+package commands
+
+import "sort"
+
+type Handler func(args []string) error
+
+var registry = map[string]Handler{}
+
+func Register(name string, h Handler) {
+	registry[name] = h
+}
+
+func Lookup(name string) (Handler, bool) {
+	h, ok := registry[name]
+	return h, ok
+}
+
+func Names() []string {
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+```
+
+- [ ] **Langkah 3: Tulis entrypoint CLI**
+
+Buat `cmd/cli/main.go`:
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"go-api-starter/cmd/cli/commands"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	cmdKey, rest := splitCommand(os.Args[1:])
+	handler, ok := commands.Lookup(cmdKey)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown command: %q\n\n", cmdKey)
+		printUsage()
+		os.Exit(1)
+	}
+
+	if err := handler(rest); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// splitCommand takes the leading non-flag arguments as the command name
+// (e.g. "migrate tenant up") and returns the rest as flags, so callers can
+// run `cli migrate tenant up --tenant=acme_corp`.
+func splitCommand(args []string) (cmdKey string, rest []string) {
+	var parts []string
+	i := 0
+	for i < len(args) && !strings.HasPrefix(args[i], "--") {
+		parts = append(parts, args[i])
+		i++
+	}
+	return strings.Join(parts, " "), args[i:]
+}
+
+func printUsage() {
+	fmt.Println("usage: cli <command> [flags]")
+	fmt.Println("\navailable commands:")
+	for _, name := range commands.Names() {
+		fmt.Println("  " + name)
+	}
+}
+```
+
+- [ ] **Langkah 4: Tulis test migration runner yang gagal**
+
+Buat `internal/migration/runner_test.go`:
+```go
+package migration_test
+
+import (
+	"testing"
+
+	"go-api-starter/internal/migration"
+	"go-api-starter/internal/testsupport"
+)
+
+func TestMigratePlatformUp_CreatesSchemaAndIsIdempotent(t *testing.T) {
+	pool := testsupport.OpenTestDB(t)
+	pool.Exec("DROP SCHEMA IF EXISTS platform CASCADE")
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA IF EXISTS platform CASCADE") })
+
+	db := pool.DB
+
+	if err := migration.MigratePlatformUp(db); err != nil {
+		t.Fatalf("first MigratePlatformUp: %v", err)
+	}
+	if err := migration.MigratePlatformUp(db); err != nil {
+		t.Fatalf("second MigratePlatformUp (should be a no-op): %v", err)
+	}
+
+	var exists bool
+	err := pool.Get(&exists, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.tables
+		WHERE table_schema = 'platform' AND table_name = 'tenants'
+	)`)
+	if err != nil {
+		t.Fatalf("check tenants table: %v", err)
+	}
+	if !exists {
+		t.Error("platform.tenants table was not created")
+	}
+}
+
+func TestLatestPlatformVersion_MatchesFileCount(t *testing.T) {
+	if got := migration.LatestPlatformVersion(); got != 5 {
+		t.Errorf("LatestPlatformVersion() = %d, want 5 (five platform migration files)", got)
+	}
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/migration/... -v`
+Hasil: FAIL — paket tidak compile (`migration.MigratePlatformUp` belum ada; juga belum ada berkas `platform/*.sql` untuk ditemukan `//go:embed`).
+
+- [ ] **Langkah 6: Tulis berkas SQL migrasi platform**
+
+Buat `internal/migration/platform/000001_create_updated_at_trigger_fn.up.sql`:
+```sql
+CREATE OR REPLACE FUNCTION platform.trigger_set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+Buat `internal/migration/platform/000001_create_updated_at_trigger_fn.down.sql`:
+```sql
+DROP FUNCTION IF EXISTS platform.trigger_set_updated_at();
+```
+
+Buat `internal/migration/platform/000002_create_tenants_table.up.sql`:
+```sql
+CREATE TABLE platform.tenants (
+    id            UUID PRIMARY KEY,
+    code          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    schema_name   TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'provisioning'
+                  CHECK (status IN ('provisioning', 'active', 'suspended')),
+    suspended_at  TIMESTAMPTZ NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at    TIMESTAMPTZ NULL,
+    created_by    UUID NULL,
+    updated_by    UUID NULL,
+    deleted_by    UUID NULL
+);
+
+CREATE UNIQUE INDEX tenants_code_key ON platform.tenants (code) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX tenants_schema_name_key ON platform.tenants (schema_name) WHERE deleted_at IS NULL;
+
+CREATE TRIGGER set_updated_at
+    BEFORE UPDATE ON platform.tenants
+    FOR EACH ROW EXECUTE FUNCTION platform.trigger_set_updated_at();
+```
+
+Buat `internal/migration/platform/000002_create_tenants_table.down.sql`:
+```sql
+DROP TABLE IF EXISTS platform.tenants;
+```
+
+Buat `internal/migration/platform/000003_create_platform_users_table.up.sql`:
+```sql
+CREATE TABLE platform.users (
+    id             UUID PRIMARY KEY,
+    email          TEXT NOT NULL,
+    password_hash  TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    is_active      BOOLEAN NOT NULL DEFAULT true,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at     TIMESTAMPTZ NULL,
+    created_by     UUID NULL,
+    updated_by     UUID NULL,
+    deleted_by     UUID NULL
+);
+
+CREATE UNIQUE INDEX platform_users_email_key ON platform.users (email) WHERE deleted_at IS NULL;
+
+CREATE TRIGGER set_updated_at
+    BEFORE UPDATE ON platform.users
+    FOR EACH ROW EXECUTE FUNCTION platform.trigger_set_updated_at();
+```
+
+Buat `internal/migration/platform/000003_create_platform_users_table.down.sql`:
+```sql
+DROP TABLE IF EXISTS platform.users;
+```
+
+Buat `internal/migration/platform/000004_create_platform_refresh_tokens_table.up.sql`:
+```sql
+CREATE TABLE platform.refresh_tokens (
+    id          UUID PRIMARY KEY,
+    user_id     UUID NOT NULL REFERENCES platform.users (id),
+    token_hash  TEXT NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    revoked_at  TIMESTAMPTZ NULL,
+    user_agent  TEXT NULL,
+    ip          TEXT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX platform_refresh_tokens_hash_key ON platform.refresh_tokens (token_hash);
+CREATE INDEX platform_refresh_tokens_user_id_idx ON platform.refresh_tokens (user_id);
+```
+
+Buat `internal/migration/platform/000004_create_platform_refresh_tokens_table.down.sql`:
+```sql
+DROP TABLE IF EXISTS platform.refresh_tokens;
+```
+
+Buat `internal/migration/platform/000005_create_login_attempts_table.up.sql`:
+```sql
+CREATE TABLE platform.login_attempts (
+    id           UUID PRIMARY KEY,
+    scope        TEXT NOT NULL CHECK (scope IN ('platform', 'tenant')),
+    tenant_id    UUID NULL,
+    email        TEXT NOT NULL,
+    success      BOOLEAN NOT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX login_attempts_lookup_idx
+    ON platform.login_attempts (scope, tenant_id, email, attempted_at DESC);
+```
+
+Buat `internal/migration/platform/000005_create_login_attempts_table.down.sql`:
+```sql
+DROP TABLE IF EXISTS platform.login_attempts;
+```
+
+- [ ] **Langkah 7: Implementasikan embed + runner (bagian platform)**
+
+Buat `internal/migration/platform_fs.go`:
+```go
+package migration
+
+import "embed"
+
+//go:embed platform/*.sql
+var PlatformFS embed.FS
+```
+
+Buat `internal/migration/runner.go`:
+```go
+package migration
+
+import (
+	"database/sql"
+	"embed"
+	"fmt"
+	"io/fs"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+)
+
+func newMigrate(db *sql.DB, fsys embed.FS, dir, schemaName string) (*migrate.Migrate, error) {
+	src, err := iofs.New(fsys, dir)
+	if err != nil {
+		return nil, fmt.Errorf("migration source %s: %w", dir, err)
+	}
+	driver, err := postgres.WithInstance(db, &postgres.Config{
+		SchemaName:      schemaName,
+		MigrationsTable: "schema_migrations",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("migration driver for schema %s: %w", schemaName, err)
+	}
+	return migrate.NewWithInstance("iofs", src, schemaName, driver)
+}
+
+// MigratePlatformUp applies every unapplied migration under platform/ to
+// the platform schema, creating that schema first if it doesn't exist yet
+// (golang-migrate's postgres driver requires the schema to already exist
+// before it opens, so schema creation can't be a migration file itself).
+func MigratePlatformUp(db *sql.DB) error {
+	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS platform"); err != nil {
+		return fmt.Errorf("create platform schema: %w", err)
+	}
+	m, err := newMigrate(db, PlatformFS, "platform", "platform")
+	if err != nil {
+		return err
+	}
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return err
+	}
+	return nil
+}
+
+// LatestPlatformVersion returns the highest migration version compiled
+// into this binary under platform/.
+func LatestPlatformVersion() uint {
+	return latestVersion(PlatformFS, "platform")
+}
+
+func latestVersion(fsys embed.FS, dir string) uint {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return 0
+	}
+	var max uint
+	for _, e := range entries {
+		underscore := strings.IndexByte(e.Name(), '_')
+		if underscore <= 0 {
+			continue
+		}
+		n, err := strconv.ParseUint(e.Name()[:underscore], 10, 64)
+		if err != nil {
+			continue
+		}
+		if uint(n) > max {
+			max = uint(n)
+		}
+	}
+	return max
+}
+
+// MigrationFile is one applied-in-order .up.sql file, exposed so callers
+// (tenant provisioning, Task 13) that need to apply migrations by hand
+// inside their own transaction — something golang-migrate itself can't
+// join, since it manages its own connection — can read the exact same
+// files the CLI's `migrate` commands use.
+type MigrationFile struct {
+	Version uint
+	SQL     string
+}
+
+func readUpFiles(fsys embed.FS, dir string) ([]MigrationFile, error) {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []MigrationFile
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".up.sql") {
+			continue
+		}
+		underscore := strings.IndexByte(name, '_')
+		if underscore <= 0 {
+			continue
+		}
+		version, err := strconv.ParseUint(name[:underscore], 10, 64)
+		if err != nil {
+			continue
+		}
+		content, err := fsys.ReadFile(dir + "/" + name)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", name, err)
+		}
+		files = append(files, MigrationFile{Version: uint(version), SQL: string(content)})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Version < files[j].Version })
+	return files, nil
+}
+```
+
+- [ ] **Langkah 8: Tulis perintah CLI migrate-platform**
+
+Buat `cmd/cli/commands/migrate.go`:
+```go
+package commands
+
+import (
+	"database/sql"
+	"fmt"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/migration"
+)
+
+func init() {
+	Register("migrate platform up", cmdMigratePlatformUp)
+}
+
+func openRawDB(dsn string) (*sql.DB, error) {
+	return sql.Open("pgx", dsn)
+}
+
+func cmdMigratePlatformUp(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	if err := migration.MigratePlatformUp(db); err != nil {
+		return fmt.Errorf("migrate platform: %w", err)
+	}
+	fmt.Println("migrasi platform berhasil diterapkan")
+	return nil
+}
+```
+
+- [ ] **Langkah 9: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/migration/... -v`
+Hasil: PASS — kedua test lolos terhadap database `app_test` lokal kamu.
+
+- [ ] **Langkah 10: Verifikasi manual perintah CLI**
+
+Jalankan: `go run ./cmd/cli migrate platform up`
+Hasil: mencetak `migrasi platform berhasil diterapkan`. Jalankan sekali lagi — hasil sama, tanpa error (idempotent).
+
+- [ ] **Langkah 11: Commit**
+
+```bash
+git add go.mod go.sum cmd/cli internal/migration
+git commit -m "feat: CLI skeleton and platform schema migrations"
+```
+
+---
