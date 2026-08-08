@@ -22,6 +22,15 @@ func badBody(c *fiber.Ctx) error {
 		apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
 }
 
+// Login godoc
+// @Summary      Admin login
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LoginRequest true "credentials"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /admin/auth/login [post]
 func (h *Handler) Login(c *fiber.Ctx) error {
 	var req LoginRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -38,6 +47,15 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 	return response.Success(c, 200, res)
 }
 
+// Refresh godoc
+// @Summary      Refresh an admin access token
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body RefreshRequest true "refresh token"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /admin/auth/refresh [post]
 func (h *Handler) Refresh(c *fiber.Ctx) error {
 	var req RefreshRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -54,6 +72,14 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 	return response.Success(c, 200, res)
 }
 
+// Logout godoc
+// @Summary      Revoke an admin refresh token
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LogoutRequest true "refresh token"
+// @Success      200 {object} map[string]any
+// @Router       /admin/auth/logout [post]
 func (h *Handler) Logout(c *fiber.Ctx) error {
 	var req LogoutRequest
 	if err := c.BodyParser(&req); err != nil {

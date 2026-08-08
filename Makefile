@@ -1,4 +1,4 @@
-.PHONY: run build build-cli test test-integration migrate-platform migrate-tenant
+.PHONY: run build build-cli test test-integration migrate-platform migrate-tenant swagger
 
 run:
 	air
@@ -20,3 +20,6 @@ migrate-platform:
 
 migrate-tenant:
 	go run ./cmd/cli migrate tenant up --all
+
+swagger:
+	swag init -g cmd/api/main.go -o docs/swagger

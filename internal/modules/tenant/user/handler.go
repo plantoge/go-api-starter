@@ -19,6 +19,16 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// Create godoc
+// @Summary      Create a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        body body CreateRequest true "new user"
+// @Success      201 {object} View
+// @Failure      422 {object} map[string]any
+// @Router       /users [post]
 func (h *Handler) Create(c *fiber.Ctx) error {
 	var req CreateRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -36,6 +46,15 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	return response.Success(c, 201, view)
 }
 
+// Get godoc
+// @Summary      Get a tenant user by ID
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        id path string true "user id"
+// @Success      200 {object} View
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [get]
 func (h *Handler) Get(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -49,6 +68,17 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 	return response.Success(c, 200, view)
 }
 
+// List godoc
+// @Summary      List tenant users
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        page query int false "page number"
+// @Param        limit query int false "page size, max 100"
+// @Param        sort query string false "created_at, name, or email"
+// @Param        order query string false "asc or desc"
+// @Success      200 {object} map[string]any
+// @Router       /users [get]
 func (h *Handler) List(c *fiber.Ctx) error {
 	params, verr := pagination.Parse(c, Sortable, "created_at")
 	if verr != nil {
@@ -62,6 +92,17 @@ func (h *Handler) List(c *fiber.Ctx) error {
 	return response.SuccessList(c, 200, views, meta)
 }
 
+// Update godoc
+// @Summary      Update a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        id path string true "user id"
+// @Param        body body UpdateRequest true "fields to change"
+// @Success      200 {object} map[string]any
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [patch]
 func (h *Handler) Update(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -80,6 +121,15 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	return response.Success(c, 200, fiber.Map{"message": "berhasil diperbarui"})
 }
 
+// Delete godoc
+// @Summary      Soft-delete a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        id path string true "user id"
+// @Success      200 {object} map[string]any
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [delete]
 func (h *Handler) Delete(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
