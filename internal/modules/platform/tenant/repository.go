@@ -3,12 +3,14 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
 	"go-api-starter/internal/middleware"
 	"go-api-starter/internal/migration"
 )
@@ -36,7 +38,8 @@ func (r *Repository) FindByCode(ctx context.Context, code string) (Tenant, error
 
 func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string) (Tenant, error) {
 	var t Tenant
-	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE code = $1`, code)
+	err := r.db.GetContext(ctx, &t,
+		`SELECT * FROM tenants WHERE code = $1 ORDER BY created_at DESC LIMIT 1`, code)
 	if err == sql.ErrNoRows {
 		return Tenant{}, apperror.NotFound("tenant tidak ditemukan")
 	}
@@ -53,10 +56,16 @@ func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.TenantRecord, error) {
 	var t Tenant
 	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL`, id)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		return middleware.TenantRecord{}, apperror.NotFound("tenant tidak ditemukan")
 	}
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
 
+	if !database.ValidSchemaName(t.SchemaName) {
+		return middleware.TenantRecord{}, apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
+	}
 	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
 	if err != nil {
 		return middleware.TenantRecord{}, apperror.Internal(err)

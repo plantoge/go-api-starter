@@ -3,12 +3,14 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"go-api-starter/internal/apperror"
 	appauth "go-api-starter/internal/auth"
@@ -73,6 +75,20 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 		return ProvisionResult{}, apperror.Internal(fmt.Errorf("normalized code %q is not a valid schema name", code))
 	}
 
+	// A soft-deleted (but not yet purged) tenant still owns its schema on
+	// disk even though its code is free again for a new row
+	// (tenants_code_key is a partial unique index on deleted_at IS NULL).
+	// Without this check, Provision would pass the INSERT below, then fail
+	// deep inside the transaction at CREATE SCHEMA with a confusing
+	// "already exists" error. Checking up front surfaces a clear conflict
+	// instead. An active/provisioning row with this code is deliberately
+	// NOT rejected here — it falls through to the INSERT below, which is
+	// where the real uniqueness constraint lives and gets classified
+	// correctly.
+	if existing, findErr := s.repo.FindByCodeIncludingDeleted(ctx, code); findErr == nil && existing.DeletedAt != nil {
+		return ProvisionResult{}, apperror.Conflict("kode tenant ini pernah dipakai dan belum di-purge — tunggu purge selesai atau gunakan kode lain")
+	}
+
 	tx, err := s.rawDB.BeginTx(ctx, nil)
 	if err != nil {
 		return ProvisionResult{}, apperror.Internal(err)
@@ -83,7 +99,14 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO platform.tenants (id, code, name, schema_name, status) VALUES ($1, $2, $3, $4, 'provisioning')`,
 		tenantID, code, in.Name, code); err != nil {
-		return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+		// Only a genuine unique-constraint violation on tenants_code_key
+		// (SQLSTATE 23505) is a duplicate code; anything else is a real
+		// Internal error.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
+		}
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("insert tenant row: %w", err))
 	}
 
 	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA "`+code+`"`); err != nil {
@@ -221,9 +244,23 @@ func (s *Service) Purge(ctx context.Context, code string) error {
 	if !database.ValidSchemaName(t.SchemaName) {
 		return apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
 	}
-	if _, err := s.rawDB.ExecContext(ctx, `DROP SCHEMA "`+t.SchemaName+`" CASCADE`); err != nil {
+
+	tx, err := s.rawDB.BeginTx(ctx, nil)
+	if err != nil {
 		return apperror.Internal(err)
 	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DROP SCHEMA IF EXISTS "`+t.SchemaName+`" CASCADE`); err != nil {
+		return apperror.Internal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM platform.tenants WHERE id = $1`, t.ID); err != nil {
+		return apperror.Internal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return apperror.Internal(err)
+	}
+
 	s.resolver.Invalidate(t.ID)
 	return nil
 }

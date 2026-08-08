@@ -12,6 +12,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"go-api-starter/internal/database"
 )
 
 func newMigrate(db *sql.DB, fsys embed.FS, dir, schemaName string) (*migrate.Migrate, error) {
@@ -130,20 +132,26 @@ func MigrateTenantUp(db *sql.DB, schemaName string) error {
 
 // TenantSchemaVersion reports the migration version currently applied to
 // schemaName, and whether it's dirty (failed mid-migration). version is 0
-// with dirty=false if no migration has ever been applied.
+// with dirty=false if no migration has ever been applied. schemaName must
+// already have been provisioned (its schema_migrations table exists) —
+// every caller of this function only reaches it for a tenant that
+// Provision (Task 14) already created and migrated.
 func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error) {
-	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
-	if err != nil {
-		return 0, false, err
+	if !database.ValidSchemaName(schemaName) {
+		return 0, false, fmt.Errorf("invalid schema name %q", schemaName)
 	}
-	v, d, err := m.Version()
-	if err == migrate.ErrNilVersion {
+	query := `SELECT version, dirty FROM "` + schemaName + `".schema_migrations LIMIT 1`
+	var v int64
+	var d bool
+	err = db.QueryRow(query).Scan(&v, &d)
+	switch {
+	case err == sql.ErrNoRows:
 		return 0, false, nil
-	}
-	if err != nil {
+	case err != nil:
 		return 0, false, err
+	default:
+		return uint(v), d, nil
 	}
-	return v, d, nil
 }
 
 // LatestTenantVersion returns the highest migration version compiled into
