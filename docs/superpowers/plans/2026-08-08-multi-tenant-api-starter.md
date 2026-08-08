@@ -692,115 +692,6 @@ package response
 import (
 	"encoding/json"
 	"errors"
-	"testing"
-
-	"github.com/gofiber/fiber/v2"
-	"go-api-starter/internal/apperror"
-)
-
-func TestSuccess_Envelope(t *testing.T) {
-	app := fiber.New()
-	app.Get("/x", func(c *fiber.Ctx) error {
-		return Success(c, 200, fiber.Map{"id": "abc"})
-	})
-
-	req := newGetRequest("/x")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test: %v", err)
-	}
-	var body struct {
-		Success bool           `json:"success"`
-		Data    map[string]any `json:"data"`
-	}
-	decode(t, resp, &body)
-	if !body.Success {
-		t.Error("success = false, want true")
-	}
-	if body.Data["id"] != "abc" {
-		t.Errorf("data.id = %v, want abc", body.Data["id"])
-	}
-}
-
-func TestError_AppError_UsesDeclaredStatus(t *testing.T) {
-	app := fiber.New()
-	app.Get("/x", func(c *fiber.Ctx) error {
-		return Error(c, "req-123", apperror.NotFound("tidak ditemukan"))
-	})
-
-	resp, err := app.Test(newGetRequest("/x"))
-	if err != nil {
-		t.Fatalf("app.Test: %v", err)
-	}
-	if resp.StatusCode != 404 {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
-	}
-	var body struct {
-		Success bool `json:"success"`
-		Error   struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-		RequestID string `json:"request_id"`
-	}
-	decode(t, resp, &body)
-	if body.Success {
-		t.Error("success = true, want false")
-	}
-	if body.Error.Code != "NOT_FOUND" {
-		t.Errorf("error.code = %q, want NOT_FOUND", body.Error.Code)
-	}
-	if body.RequestID != "req-123" {
-		t.Errorf("request_id = %q, want req-123", body.RequestID)
-	}
-}
-
-func TestError_UnknownError_Becomes500WithoutLeakingDetail(t *testing.T) {
-	app := fiber.New()
-	app.Get("/x", func(c *fiber.Ctx) error {
-		return Error(c, "req-456", errors.New("leaked secret detail"))
-	})
-
-	resp, err := app.Test(newGetRequest("/x"))
-	if err != nil {
-		t.Fatalf("app.Test: %v", err)
-	}
-	if resp.StatusCode != 500 {
-		t.Errorf("status = %d, want 500", resp.StatusCode)
-	}
-	var body struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	decode(t, resp, &body)
-	if body.Error.Message == "leaked secret detail" {
-		t.Error("internal error message leaked to client response")
-	}
-}
-
-func newGetRequest(path string) *httpRequest {
-	return newRequest("GET", path)
-}
-
-func decode(t *testing.T, resp *fiberResponse, v any) {
-	t.Helper()
-	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-		t.Fatalf("decode response body: %v", err)
-	}
-}
-```
-
-- [ ] **Step 7: Fix the test file's request helpers (Fiber's `app.Test` takes `*http.Request`)**
-
-Replace the placeholder helpers at the bottom of `internal/response/response_test.go` — delete `newGetRequest`, `decode`'s type aliases, and use `net/http` and `net/http/httptest` directly instead:
-
-```go
-package response
-
-import (
-	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -896,14 +787,12 @@ func TestError_UnknownError_Becomes500WithoutLeakingDetail(t *testing.T) {
 }
 ```
 
-(This replaces the whole file — the Step 6 version above was illustrative; Step 7's version is what actually gets saved to disk.)
-
-- [ ] **Step 8: Run test to verify it fails**
+- [ ] **Step 7: Run test to verify it fails**
 
 Run: `go test ./internal/response/... -v`
 Expected: FAIL — package does not compile (`Success`, `Error` undefined).
 
-- [ ] **Step 9: Implement response.go**
+- [ ] **Step 8: Implement response.go**
 
 Create `internal/response/response.go`:
 ```go
@@ -975,12 +864,12 @@ func Error(c *fiber.Ctx, requestID string, err error) error {
 }
 ```
 
-- [ ] **Step 10: Run tests to verify they pass**
+- [ ] **Step 9: Run tests to verify they pass**
 
 Run: `go test ./internal/response/... -v`
 Expected: PASS — all three tests pass.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add go.mod go.sum internal/apperror internal/response
@@ -6127,3 +6016,2519 @@ git commit -m "feat: RBAC middleware with permission cache and tenant role servi
 ```
 
 ---
+
+### Task 16: Tenant auth module — login (with `tenant_code`), refresh, logout
+
+**Design notes:**
+- Every tenant-auth request body carries `tenant_code` — including refresh and logout — because a bare refresh token doesn't say which tenant's schema its row lives in, and there's no token yet to carry that (that's exactly what login is establishing). The client keeps `tenant_code` alongside its tokens.
+- Login is the one place tenant identity is established **without** a prior `RequireTenant` pass — there's no token yet — so the service injects `database.TenantInfo` into `ctx` itself, by hand, before calling `WithTenant`.
+- The tenant lookup interface returns `middleware.TenantRecord` (reused, not a new type) so this module doesn't need its own tenant-shape struct.
+
+**Files:**
+- Create: `internal/modules/tenant/auth/dto.go`
+- Create: `internal/modules/tenant/auth/service.go`
+- Create: `internal/modules/tenant/auth/handler.go`
+- Modify: `internal/modules/platform/tenant/repository.go` — add `FindRecordByCode`
+- Modify: `internal/testsupport/testsupport.go` — add exported `SeedInSchema`
+- Test: `internal/modules/tenant/auth/service_test.go`
+
+**Interfaces:**
+- Produces:
+  - `tenantauth.LoginRequest { TenantCode, Email, Password string }`, `RefreshRequest { TenantCode, RefreshToken string }`, `LogoutRequest { TenantCode, RefreshToken string }`
+  - `tenantauth.LoginResponse { AccessToken, RefreshToken string; ExpiresIn int }`
+  - `tenantauth.TenantLookup interface { FindRecordByCode(ctx, code string) (middleware.TenantRecord, error) }`
+  - `tenantauth.NewService(db *database.DB, tenants TenantLookup, tokens *auth.TokenManager, accessTTL, refreshTTL time.Duration, rateLimiter *ratelimit.LoginAttemptService) *Service`
+  - `(s *Service) Login/Refresh/Logout` — same shape as Task 12's platform equivalent.
+  - `tenantauth.NewHandler(svc *Service) *Handler` with `Login`, `Refresh`, `Logout` (wired to routes in Task 18).
+  - `(r *tenant.Repository) FindRecordByCode(ctx, code string) (middleware.TenantRecord, error)` — implements `tenantauth.TenantLookup`.
+  - `testsupport.SeedInSchema(t, pool *sqlx.DB, schema, query string, args ...any)`
+
+- [ ] **Step 1: Add the shared seed helper to testsupport**
+
+Modify `internal/testsupport/testsupport.go` — add:
+```go
+// SeedInSchema runs a fixture-setup query with search_path pinned to
+// schema, for tests that need to insert rows directly rather than going
+// through database.WithTenant themselves.
+func SeedInSchema(t *testing.T, pool *sqlx.DB, schema, query string, args ...any) {
+	t.Helper()
+	tx, err := pool.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL search_path TO "`+schema+`"`); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
+		t.Fatalf("seed query: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Add `FindRecordByCode` to the platform tenant repository**
+
+Modify `internal/modules/platform/tenant/repository.go` — add this method, reusing `FindByCode` and the same migration-version lookup `FindByID` already does:
+```go
+// FindRecordByCode is FindByCode plus a migration-version check, shaped as
+// middleware.TenantRecord — the tenant/auth module's login flow (Task 16)
+// uses this to resolve a tenant_code to enough info to attempt a login.
+func (r *Repository) FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error) {
+	t, err := r.FindByCode(ctx, code)
+	if err != nil {
+		return middleware.TenantRecord{}, err
+	}
+	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
+	return middleware.TenantRecord{
+		TenantID: t.ID, SchemaName: t.SchemaName, Status: t.Status,
+		SchemaVersion: version, SchemaDirty: dirty,
+	}, nil
+}
+```
+
+- [ ] **Step 3: Run existing tests to verify nothing broke**
+
+Run: `go test ./internal/modules/platform/tenant/... -v`
+Expected: PASS — the five tests from Task 14 still pass; this was an additive change.
+
+- [ ] **Step 4: Write the failing service test**
+
+Create `internal/modules/tenant/auth/service_test.go`:
+```go
+package auth_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/testsupport"
+)
+
+type fakeTenantLookup struct {
+	record middleware.TenantRecord
+}
+
+func (f *fakeTenantLookup) FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error) {
+	return f.record, nil
+}
+
+func setupTenantAuthService(t *testing.T) (*tenantauth.Service, string) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	plainPassword := "correct-horse-battery"
+	hash, err := appauth.HashPassword(plainPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	testsupport.SeedInSchema(t, pool, schema,
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, 'staff@example.com', $2, 'Staff', true)`,
+		uuid.New(), hash)
+
+	db := database.NewDB(pool)
+	platformPool := testsupport.OpenTestPlatformDB(t)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, 5, 15*time.Minute)
+	lookup := &fakeTenantLookup{record: middleware.TenantRecord{TenantID: uuid.New(), SchemaName: schema, Status: "active"}}
+
+	tokens := appauth.NewTokenManager("test-secret", 15*time.Minute)
+	svc := tenantauth.NewService(db, lookup, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	return svc, plainPassword
+}
+
+func TestLogin_ValidCredentials_ReturnsTokens(t *testing.T) {
+	svc, password := setupTenantAuthService(t)
+
+	res, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: password,
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if res.AccessToken == "" || res.RefreshToken == "" {
+		t.Error("Login() returned an empty token")
+	}
+}
+
+func TestLogin_WrongPassword_ReturnsUnauthorized(t *testing.T) {
+	svc, _ := setupTenantAuthService(t)
+
+	if _, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: "wrong",
+	}); err == nil {
+		t.Fatal("Login() with a wrong password succeeded")
+	}
+}
+
+func TestRefresh_ValidToken_IssuesNewAccessToken(t *testing.T) {
+	svc, password := setupTenantAuthService(t)
+	login, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: password,
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	res, err := svc.Refresh(context.Background(), tenantauth.RefreshRequest{
+		TenantCode: "acme_corp", RefreshToken: login.RefreshToken,
+	})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if res.AccessToken == "" {
+		t.Error("Refresh() returned an empty access token")
+	}
+}
+
+func TestLogout_RevokesRefreshToken(t *testing.T) {
+	svc, password := setupTenantAuthService(t)
+	login, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: password,
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if err := svc.Logout(context.Background(), tenantauth.LogoutRequest{
+		TenantCode: "acme_corp", RefreshToken: login.RefreshToken,
+	}); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, err := svc.Refresh(context.Background(), tenantauth.RefreshRequest{
+		TenantCode: "acme_corp", RefreshToken: login.RefreshToken,
+	}); err == nil {
+		t.Error("Refresh() succeeded with a revoked refresh token")
+	}
+}
+```
+
+- [ ] **Step 5: Run test to verify it fails**
+
+Run: `go test ./internal/modules/tenant/auth/... -v`
+Expected: FAIL — package does not compile.
+
+- [ ] **Step 6: Implement dto.go**
+
+Create `internal/modules/tenant/auth/dto.go`:
+```go
+package auth
+
+type LoginRequest struct {
+	TenantCode string `json:"tenant_code" validate:"required"`
+	Email      string `json:"email" validate:"required,email"`
+	Password   string `json:"password" validate:"required"`
+}
+
+type LoginResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+type RefreshRequest struct {
+	TenantCode   string `json:"tenant_code" validate:"required"`
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+type LogoutRequest struct {
+	TenantCode   string `json:"tenant_code" validate:"required"`
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+```
+
+- [ ] **Step 7: Implement service.go**
+
+Create `internal/modules/tenant/auth/service.go`:
+```go
+package auth
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/ratelimit"
+)
+
+// TenantLookup resolves a tenant_code to enough info to attempt a login.
+// Declared here, consumer-side, and implemented by
+// modules/platform/tenant.Repository (Task 14).
+type TenantLookup interface {
+	FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error)
+}
+
+type tenantUser struct {
+	ID           uuid.UUID `db:"id"`
+	PasswordHash string    `db:"password_hash"`
+	IsActive     bool      `db:"is_active"`
+}
+
+type Service struct {
+	db          *database.DB
+	tenants     TenantLookup
+	tokens      *appauth.TokenManager
+	accessTTL   time.Duration
+	refreshTTL  time.Duration
+	rateLimiter *ratelimit.LoginAttemptService
+}
+
+func NewService(db *database.DB, tenants TenantLookup, tokens *appauth.TokenManager, accessTTL, refreshTTL time.Duration, rateLimiter *ratelimit.LoginAttemptService) *Service {
+	return &Service{db: db, tenants: tenants, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
+}
+
+func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, error) {
+	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
+	if err != nil || tenantRec.Status != "active" {
+		return LoginResponse{}, apperror.Unauthorized("tenant_code, email, atau password salah")
+	}
+
+	if err := s.rateLimiter.Check(ctx, appauth.ScopeTenant, &tenantRec.TenantID, req.Email); err != nil {
+		return LoginResponse{}, err
+	}
+
+	// Login is the one place tenant identity is established without a
+	// prior RequireTenant pass — there's no token yet — so TenantInfo is
+	// injected into ctx by hand before using WithTenant.
+	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
+		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
+	})
+
+	var u tenantUser
+	found := false
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		getErr := tx.Get(&u, `SELECT id, password_hash, is_active FROM users WHERE email = $1 AND deleted_at IS NULL`, req.Email)
+		if getErr == nil {
+			found = true
+		}
+		return nil // a missing user isn't a transaction failure — just an invalid login
+	})
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	valid := found && u.IsActive && appauth.VerifyPassword(u.PasswordHash, req.Password)
+	s.rateLimiter.Record(ctx, appauth.ScopeTenant, &tenantRec.TenantID, req.Email, valid)
+	if !valid {
+		return LoginResponse{}, apperror.Unauthorized("tenant_code, email, atau password salah")
+	}
+
+	return s.issueTokens(tenantCtx, tenantRec.TenantID, u.ID)
+}
+
+func (s *Service) issueTokens(tenantCtx context.Context, tenantID, userID uuid.UUID) (LoginResponse, error) {
+	access, err := s.tokens.IssueAccessToken(userID, appauth.ScopeTenant, &tenantID)
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	plain, hash, err := appauth.GenerateRefreshToken()
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		_, execErr := tx.Exec(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+			uuid.New(), userID, hash, time.Now().Add(s.refreshTTL))
+		return execErr
+	})
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	return LoginResponse{AccessToken: access, RefreshToken: plain, ExpiresIn: int(s.accessTTL.Seconds())}, nil
+}
+
+func (s *Service) Refresh(ctx context.Context, req RefreshRequest) (LoginResponse, error) {
+	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
+	if err != nil || tenantRec.Status != "active" {
+		return LoginResponse{}, apperror.Unauthorized("refresh token tidak valid")
+	}
+	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
+		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
+	})
+
+	hash := appauth.HashRefreshToken(req.RefreshToken)
+	var row struct {
+		UserID    uuid.UUID  `db:"user_id"`
+		ExpiresAt time.Time  `db:"expires_at"`
+		RevokedAt *time.Time `db:"revoked_at"`
+	}
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		return tx.Get(&row, `SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = $1`, hash)
+	})
+	if err != nil {
+		return LoginResponse{}, apperror.Unauthorized("refresh token tidak valid")
+	}
+	if row.RevokedAt != nil || time.Now().After(row.ExpiresAt) {
+		return LoginResponse{}, apperror.Unauthorized("refresh token sudah tidak berlaku")
+	}
+
+	access, err := s.tokens.IssueAccessToken(row.UserID, appauth.ScopeTenant, &tenantRec.TenantID)
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+	return LoginResponse{AccessToken: access, RefreshToken: req.RefreshToken, ExpiresIn: int(s.accessTTL.Seconds())}, nil
+}
+
+func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
+	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
+	if err != nil {
+		return apperror.Unauthorized("tenant tidak ditemukan")
+	}
+	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
+		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
+	})
+
+	hash := appauth.HashRefreshToken(req.RefreshToken)
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		_, execErr := tx.Exec(`UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, hash)
+		return execErr
+	})
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+```
+
+- [ ] **Step 8: Run tests to verify they pass**
+
+Run: `go test ./internal/modules/tenant/auth/... -v`
+Expected: PASS — all four tests pass.
+
+- [ ] **Step 9: Implement the handler**
+
+Create `internal/modules/tenant/auth/handler.go`:
+```go
+package auth
+
+import (
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/response"
+	"go-api-starter/internal/validator"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+func badBody(c *fiber.Ctx) error {
+	return response.Error(c, middleware.RequestIDFromCtx(c),
+		apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+}
+
+func (h *Handler) Login(c *fiber.Ctx) error {
+	var req LoginRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+	res, err := h.svc.Login(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, res)
+}
+
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+	var req RefreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+	res, err := h.svc.Refresh(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, res)
+}
+
+func (h *Handler) Logout(c *fiber.Ctx) error {
+	var req LogoutRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+	if err := h.svc.Logout(c.UserContext(), req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil logout"})
+}
+```
+
+- [ ] **Step 10: Verify it builds**
+
+Run: `go build ./...`
+Expected: succeeds.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add internal/modules/tenant/auth internal/modules/platform/tenant/repository.go internal/testsupport
+git commit -m "feat: tenant auth (login/refresh/logout) with tenant_code resolution"
+```
+
+---
+
+### Task 17: Tenant `user` module — the example pattern
+
+This is the module every future tenant-scoped module (`product`, `order`, whatever a project turned on this starter needs) copies. Every convention the starter established gets demonstrated here: `WithTenant` for every query, soft delete, `*_by` audit columns from `database.ActorFromContext`, the pagination sort whitelist, and the handler → service → repository shape.
+
+**Files:**
+- Create: `internal/modules/tenant/user/model.go`
+- Create: `internal/modules/tenant/user/dto.go`
+- Create: `internal/modules/tenant/user/repository.go`
+- Create: `internal/modules/tenant/user/service.go`
+- Create: `internal/modules/tenant/user/handler.go`
+- Test: `internal/modules/tenant/user/repository_test.go`
+
+**Interfaces:**
+- Produces:
+  - `user.User` (DB row struct), `user.CreateRequest`, `user.UpdateRequest`, `user.View`
+  - `user.Sortable map[string]string` — the whitelist template for every future module.
+  - `user.NewRepository(db *database.DB) *Repository` with `Create/FindByID/List/Update/Delete`
+  - `user.NewService(repo *Repository) *Service` with `Create/Get/List/Update/Delete`
+  - `user.NewHandler(svc *Service) *Handler` with `Create/Get/List/Update/Delete` (`func(c *fiber.Ctx) error`), wired to routes in Task 18 behind `RequireTenant` + `RequirePermission`.
+
+- [ ] **Step 1: Write the failing repository test**
+
+Create `internal/modules/tenant/user/repository_test.go`:
+```go
+package user_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/migration"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/testsupport"
+)
+
+func setupUserRepo(t *testing.T) (*tenantuser.Repository, context.Context) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	db := database.NewDB(pool)
+	ctx := database.WithTenantInfo(context.Background(), database.TenantInfo{TenantID: uuid.New(), SchemaName: schema})
+	ctx = database.WithActor(ctx, database.Actor{UserID: uuid.New(), Scope: "tenant"})
+	return tenantuser.NewRepository(db), ctx
+}
+
+func TestCreateAndFindByID(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+
+	u := tenantuser.User{ID: uuid.New(), Email: "a@example.com", PasswordHash: "hash", Name: "A", IsActive: true}
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.Email != "a@example.com" {
+		t.Errorf("Email = %q, want a@example.com", got.Email)
+	}
+}
+
+func TestCreate_DuplicateEmail_ReturnsConflict(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+
+	u1 := tenantuser.User{ID: uuid.New(), Email: "dup@example.com", PasswordHash: "hash", Name: "A", IsActive: true}
+	if err := repo.Create(ctx, u1); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	u2 := tenantuser.User{ID: uuid.New(), Email: "dup@example.com", PasswordHash: "hash", Name: "B", IsActive: true}
+	if err := repo.Create(ctx, u2); err == nil {
+		t.Fatal("second Create with duplicate email succeeded, want conflict")
+	}
+}
+
+func TestFindByID_NotFound(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+
+	if _, err := repo.FindByID(ctx, uuid.New()); err == nil {
+		t.Fatal("FindByID() for a nonexistent id succeeded, want not-found error")
+	}
+}
+
+func TestUpdate_ChangesNameAndIsActive(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+	u := tenantuser.User{ID: uuid.New(), Email: "u@example.com", PasswordHash: "hash", Name: "Old", IsActive: true}
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	newName := "New"
+	inactive := false
+	if err := repo.Update(ctx, u.ID, &newName, &inactive); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.Name != "New" || got.IsActive != false {
+		t.Errorf("got Name=%q IsActive=%v, want Name=New IsActive=false", got.Name, got.IsActive)
+	}
+}
+
+func TestDelete_SoftDeletesAndHidesFromFindAndList(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+	u := tenantuser.User{ID: uuid.New(), Email: "gone@example.com", PasswordHash: "hash", Name: "Gone", IsActive: true}
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := repo.Delete(ctx, u.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := repo.FindByID(ctx, u.ID); err == nil {
+		t.Error("FindByID() found a soft-deleted user")
+	}
+
+	users, total, err := repo.List(ctx, 20, 0, "created_at DESC")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, lu := range users {
+		if lu.ID == u.ID {
+			t.Error("List() returned a soft-deleted user")
+		}
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0 (the only user was soft-deleted)", total)
+	}
+}
+
+func TestList_RespectsLimitAndOrder(t *testing.T) {
+	repo, ctx := setupUserRepo(t)
+	for i := 0; i < 3; i++ {
+		u := tenantuser.User{
+			ID: uuid.New(), Email: uuid.New().String() + "@example.com",
+			PasswordHash: "hash", Name: "User", IsActive: true,
+		}
+		if err := repo.Create(ctx, u); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	users, total, err := repo.List(ctx, 2, 0, "created_at DESC")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(users) != 2 {
+		t.Errorf("len(users) = %d, want 2 (limit)", len(users))
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./internal/modules/tenant/user/... -v`
+Expected: FAIL — package does not compile.
+
+- [ ] **Step 3: Implement model.go and dto.go**
+
+Create `internal/modules/tenant/user/model.go`:
+```go
+package user
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type User struct {
+	ID           uuid.UUID  `db:"id"`
+	Email        string     `db:"email"`
+	PasswordHash string     `db:"password_hash"`
+	Name         string     `db:"name"`
+	IsActive     bool       `db:"is_active"`
+	CreatedAt    time.Time  `db:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at"`
+	DeletedAt    *time.Time `db:"deleted_at"`
+}
+```
+
+Create `internal/modules/tenant/user/dto.go`:
+```go
+package user
+
+type CreateRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8"`
+	Name     string `json:"name" validate:"required"`
+}
+
+type UpdateRequest struct {
+	Name     *string `json:"name"`
+	IsActive *bool   `json:"is_active"`
+}
+
+type View struct {
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	IsActive bool   `json:"is_active"`
+}
+
+func toView(u User) View {
+	return View{ID: u.ID.String(), Email: u.Email, Name: u.Name, IsActive: u.IsActive}
+}
+```
+
+- [ ] **Step 4: Implement repository.go**
+
+Create `internal/modules/tenant/user/repository.go`:
+```go
+package user
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/database"
+)
+
+// Sortable is the whitelist of columns the list endpoint may sort by,
+// consumed through pagination.Params.OrderByClause — never the raw query
+// value. Copy this pattern for every new tenant-scoped module.
+var Sortable = map[string]string{
+	"created_at": "created_at",
+	"name":       "name",
+	"email":      "email",
+}
+
+type Repository struct {
+	db *database.DB
+}
+
+func NewRepository(db *database.DB) *Repository {
+	return &Repository{db: db}
+}
+
+func wrapDBErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var appErr *apperror.Error
+	if errors.As(err, &appErr) {
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return apperror.NotFound("user tidak ditemukan")
+	}
+	return apperror.Internal(err)
+}
+
+func (r *Repository) Create(ctx context.Context, u User) error {
+	actor, _ := database.ActorFromContext(ctx)
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO users (id, email, password_hash, name, is_active, created_by) VALUES ($1, $2, $3, $4, $5, $6)`,
+			u.ID, u.Email, u.PasswordHash, u.Name, u.IsActive, actor.UserID)
+		return err
+	})
+	if err != nil {
+		// A duplicate email is by far the most likely failure here, and
+		// the unique partial index makes it unambiguous — reported as a
+		// conflict rather than a generic 500.
+		return apperror.Conflict("email sudah dipakai")
+	}
+	return nil
+}
+
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
+	var u User
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		return tx.Get(&u, `SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL`, id)
+	})
+	if err != nil {
+		return User{}, wrapDBErr(err)
+	}
+	return u, nil
+}
+
+func (r *Repository) List(ctx context.Context, limit, offset int, orderBy string) ([]User, int, error) {
+	var users []User
+	var total int
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		query := `SELECT * FROM users WHERE deleted_at IS NULL ORDER BY ` + orderBy + ` LIMIT $1 OFFSET $2`
+		if err := tx.Select(&users, query, limit, offset); err != nil {
+			return err
+		}
+		return tx.Get(&total, `SELECT count(*) FROM users WHERE deleted_at IS NULL`)
+	})
+	if err != nil {
+		return nil, 0, wrapDBErr(err)
+	}
+	return users, total, nil
+}
+
+func (r *Repository) Update(ctx context.Context, id uuid.UUID, name *string, isActive *bool) error {
+	actor, _ := database.ActorFromContext(ctx)
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE users SET name = COALESCE($2, name), is_active = COALESCE($3, is_active), updated_by = $4
+			 WHERE id = $1 AND deleted_at IS NULL`,
+			id, name, isActive, actor.UserID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return apperror.NotFound("user tidak ditemukan")
+		}
+		return nil
+	})
+	return wrapDBErr(err)
+}
+
+func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
+	actor, _ := database.ActorFromContext(ctx)
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE users SET deleted_at = now(), deleted_by = $2 WHERE id = $1 AND deleted_at IS NULL`,
+			id, actor.UserID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return apperror.NotFound("user tidak ditemukan")
+		}
+		return nil
+	})
+	return wrapDBErr(err)
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `go test ./internal/modules/tenant/user/... -v`
+Expected: PASS — all six tests pass.
+
+- [ ] **Step 6: Implement service.go**
+
+Create `internal/modules/tenant/user/service.go`:
+```go
+package user
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/pagination"
+	"go-api-starter/internal/response"
+)
+
+type Service struct {
+	repo *Repository
+}
+
+func NewService(repo *Repository) *Service {
+	return &Service{repo: repo}
+}
+
+func (s *Service) Create(ctx context.Context, req CreateRequest) (View, error) {
+	if err := appauth.ValidatePasswordStrength(req.Password); err != nil {
+		return View{}, err
+	}
+	hash, err := appauth.HashPassword(req.Password)
+	if err != nil {
+		return View{}, err
+	}
+	u := User{ID: uuid.New(), Email: req.Email, PasswordHash: hash, Name: req.Name, IsActive: true}
+	if err := s.repo.Create(ctx, u); err != nil {
+		return View{}, err
+	}
+	return toView(u), nil
+}
+
+func (s *Service) Get(ctx context.Context, id uuid.UUID) (View, error) {
+	u, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return View{}, err
+	}
+	return toView(u), nil
+}
+
+func (s *Service) List(ctx context.Context, p pagination.Params) ([]View, response.Meta, error) {
+	users, total, err := s.repo.List(ctx, p.Limit, p.Offset(), p.OrderByClause(Sortable))
+	if err != nil {
+		return nil, response.Meta{}, err
+	}
+	views := make([]View, len(users))
+	for i, u := range users {
+		views[i] = toView(u)
+	}
+	return views, pagination.BuildMeta(p.Page, p.Limit, total), nil
+}
+
+func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) error {
+	return s.repo.Update(ctx, id, req.Name, req.IsActive)
+}
+
+func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repo.Delete(ctx, id)
+}
+```
+
+- [ ] **Step 7: Implement handler.go**
+
+Create `internal/modules/tenant/user/handler.go`:
+```go
+package user
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/pagination"
+	"go-api-starter/internal/response"
+	"go-api-starter/internal/validator"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+func (h *Handler) Create(c *fiber.Ctx) error {
+	var req CreateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c),
+			apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	view, err := h.svc.Create(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 201, view)
+}
+
+func (h *Handler) Get(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), apperror.NotFound("user tidak ditemukan"))
+	}
+
+	view, err := h.svc.Get(c.UserContext(), id)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, view)
+}
+
+func (h *Handler) List(c *fiber.Ctx) error {
+	params, verr := pagination.Parse(c, Sortable, "created_at")
+	if verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+
+	views, meta, err := h.svc.List(c.UserContext(), params)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.SuccessList(c, 200, views, meta)
+}
+
+func (h *Handler) Update(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), apperror.NotFound("user tidak ditemukan"))
+	}
+
+	var req UpdateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c),
+			apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+	}
+
+	if err := h.svc.Update(c.UserContext(), id, req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil diperbarui"})
+}
+
+func (h *Handler) Delete(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), apperror.NotFound("user tidak ditemukan"))
+	}
+
+	if err := h.svc.Delete(c.UserContext(), id); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil dihapus"})
+}
+```
+
+- [ ] **Step 8: Verify it builds**
+
+Run: `go build ./...`
+Expected: succeeds.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add internal/modules/tenant/user
+git commit -m "feat: tenant user module — the example CRUD pattern for future modules"
+```
+
+---
+
+### Task 18: HTTP server wiring — router, health checks, graceful shutdown, `main.go`
+
+Full route-behavior testing (auth → RBAC → tenant isolation, end to end over real HTTP) is deliberately left to Task 20's integration test, which exercises this exact router. This task's own test only covers the health endpoints, which are simple enough to verify in isolation; everything else is verified by building and by the manual smoke test in Step 5.
+
+**Files:**
+- Create: `internal/server/router.go`
+- Create: `internal/server/health.go`
+- Create: `cmd/api/main.go`
+- Test: `internal/server/health_test.go`
+
+**Interfaces:**
+- Produces:
+  - `server.Dependencies` struct — every handler and cache `NewRouter` needs.
+  - `server.NewRouter(deps Dependencies, corsOrigins []string) *fiber.App`
+  - `server.RegisterHealth(app *fiber.App, pool *sqlx.DB)`
+  - Routes: `POST /api/v1/admin/auth/{login,refresh,logout}`, `POST /api/v1/auth/{login,refresh,logout}`, `POST|GET /api/v1/users`, `GET|PATCH|DELETE /api/v1/users/:id` (all five behind `RequireTenant` + `RequirePermission`).
+
+- [ ] **Step 1: Write the failing health test**
+
+Create `internal/server/health_test.go`:
+```go
+package server_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/server"
+	"go-api-starter/internal/testsupport"
+)
+
+func TestHealth_AlwaysOK(t *testing.T) {
+	app := fiber.New()
+	pool := testsupport.OpenTestDB(t)
+	server.RegisterHealth(app, pool)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/health", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestHealthReady_OKWhenDBReachable(t *testing.T) {
+	app := fiber.New()
+	pool := testsupport.OpenTestDB(t)
+	server.RegisterHealth(app, pool)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./internal/server/... -v`
+Expected: FAIL — package does not compile.
+
+- [ ] **Step 3: Implement health.go**
+
+Create `internal/server/health.go`:
+```go
+package server
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/jmoiron/sqlx"
+)
+
+// RegisterHealth attaches liveness and readiness endpoints. /health never
+// touches the database — it only proves the process is alive and
+// responding. /health/ready additionally pings the database, so a load
+// balancer or orchestrator can tell "running" apart from "actually able to
+// serve requests."
+func RegisterHealth(app *fiber.App, pool *sqlx.DB) {
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+	app.Get("/health/ready", func(c *fiber.Ctx) error {
+		if err := pool.PingContext(c.Context()); err != nil {
+			return c.Status(503).JSON(fiber.Map{"status": "not ready"})
+		}
+		return c.JSON(fiber.Map{"status": "ready"})
+	})
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `go test ./internal/server/... -v`
+Expected: PASS — both tests pass.
+
+- [ ] **Step 5: Implement router.go**
+
+Create `internal/server/router.go`:
+```go
+package server
+
+import (
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/middleware"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/permission"
+	"go-api-starter/internal/response"
+)
+
+// Dependencies collects every constructed handler and cache NewRouter
+// needs. Built once in cmd/api/main.go, kept here as a single struct so
+// main.go's job stays "construct dependencies, hand them to NewRouter"
+// rather than router logic and dependency construction tangled together.
+type Dependencies struct {
+	Tokens          *auth.TokenManager
+	TenantResolver  *middleware.TenantResolver
+	PermissionCache *middleware.PermissionCache
+	PlatformAuth    *platformauth.Handler
+	TenantAuth      *tenantauth.Handler
+	TenantUser      *tenantuser.Handler
+}
+
+// NewRouter builds the full Fiber app: global middleware, then every route
+// under /api/v1. Health endpoints are registered separately via
+// RegisterHealth (main.go calls both).
+func NewRouter(deps Dependencies, corsOrigins []string) *fiber.App {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return response.Error(c, middleware.RequestIDFromCtx(c), err)
+		},
+	})
+
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.Recover())
+	app.Use(middleware.CORS(corsOrigins))
+
+	api := app.Group("/api/v1")
+
+	admin := api.Group("/admin")
+	admin.Post("/auth/login", deps.PlatformAuth.Login)
+	admin.Post("/auth/refresh", deps.PlatformAuth.Refresh)
+	admin.Post("/auth/logout", deps.PlatformAuth.Logout)
+
+	api.Post("/auth/login", deps.TenantAuth.Login)
+	api.Post("/auth/refresh", deps.TenantAuth.Refresh)
+	api.Post("/auth/logout", deps.TenantAuth.Logout)
+
+	tenantAPI := api.Group("", middleware.RequireTenant(deps.Tokens, deps.TenantResolver))
+
+	users := tenantAPI.Group("/users")
+	users.Post("/", middleware.RequirePermission(permission.UserCreate, deps.PermissionCache), deps.TenantUser.Create)
+	users.Get("/", middleware.RequirePermission(permission.UserView, deps.PermissionCache), deps.TenantUser.List)
+	users.Get("/:id", middleware.RequirePermission(permission.UserView, deps.PermissionCache), deps.TenantUser.Get)
+	users.Patch("/:id", middleware.RequirePermission(permission.UserUpdate, deps.PermissionCache), deps.TenantUser.Update)
+	users.Delete("/:id", middleware.RequirePermission(permission.UserDelete, deps.PermissionCache), deps.TenantUser.Delete)
+
+	return app
+}
+```
+
+- [ ] **Step 6: Implement main.go**
+
+Create `cmd/api/main.go`:
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	platformtenant "go-api-starter/internal/modules/platform/tenant"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	tenantrole "go-api-starter/internal/modules/tenant/role"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/server"
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("config", "error", err)
+		os.Exit(1)
+	}
+
+	pool, err := database.NewPool(cfg.DB)
+	if err != nil {
+		slog.Error("db pool", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	platformPool, err := database.NewPlatformPool(cfg.DB)
+	if err != nil {
+		slog.Error("platform db pool", "error", err)
+		os.Exit(1)
+	}
+	defer platformPool.Close()
+
+	db := database.NewDB(pool)
+	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.AccessTokenTTL)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, cfg.Login.MaxAttempts, cfg.Login.AttemptWindow)
+
+	// tenantRepo satisfies both middleware.TenantLookup (FindByID) and
+	// tenantauth.TenantLookup (FindRecordByCode) — one repository, two
+	// different lookup shapes for two different callers.
+	tenantRepo := platformtenant.NewRepository(platformPool, pool.DB)
+	tenantResolver := middleware.NewTenantResolver(tenantRepo, time.Minute)
+
+	roleSvc := tenantrole.NewService(db)
+	permCache := middleware.NewPermissionCache(roleSvc, time.Minute)
+
+	platformAuthSvc := platformauth.NewService(platformPool, tokens, cfg.JWT.AccessTokenTTL, cfg.JWT.RefreshTokenTTL, rateLimiter)
+	tenantAuthSvc := tenantauth.NewService(db, tenantRepo, tokens, cfg.JWT.AccessTokenTTL, cfg.JWT.RefreshTokenTTL, rateLimiter)
+
+	userSvc := tenantuser.NewService(tenantuser.NewRepository(db))
+
+	deps := server.Dependencies{
+		Tokens:          tokens,
+		TenantResolver:  tenantResolver,
+		PermissionCache: permCache,
+		PlatformAuth:    platformauth.NewHandler(platformAuthSvc),
+		TenantAuth:      tenantauth.NewHandler(tenantAuthSvc),
+		TenantUser:      tenantuser.NewHandler(userSvc),
+	}
+	app := server.NewRouter(deps, cfg.CORS.AllowedOrigins)
+	server.RegisterHealth(app, pool)
+
+	go func() {
+		addr := fmt.Sprintf(":%d", cfg.App.Port)
+		slog.Info("listening", "addr", addr)
+		if err := app.Listen(addr); err != nil {
+			slog.Error("server stopped", "error", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.App.ShutdownTimeout)
+	defer cancel()
+	if err := app.ShutdownWithContext(ctx); err != nil {
+		slog.Error("graceful shutdown failed", "error", err)
+	}
+}
+```
+
+- [ ] **Step 7: Verify it builds**
+
+Run: `go build ./...`
+Expected: succeeds.
+
+- [ ] **Step 8: Manually smoke-test the whole stack**
+
+Run:
+```bash
+go run ./cmd/cli migrate platform up
+go run ./cmd/cli admin create --email=you@example.com --name="Your Name"
+go run ./cmd/cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=owner@acmecorp.test
+go run ./cmd/api
+```
+In another terminal:
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/health/ready
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_code":"acme_corp","email":"owner@acmecorp.test","password":"<owner password from tenant create>"}'
+```
+Expected: `/health` and `/health/ready` return `{"status":"ok"}` / `{"status":"ready"}`; login returns `access_token`, `refresh_token`, `expires_in`. Copy the `access_token` and confirm RBAC works — the owner (`is_system` bypass) can list users:
+```bash
+curl http://localhost:8080/api/v1/users -H "Authorization: Bearer <access_token>"
+```
+Expected: `{"success":true,"data":[...],"meta":{...}}` — at least the owner user created during provisioning.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add internal/server cmd/api
+git commit -m "feat: HTTP server wiring — router, health checks, graceful shutdown"
+```
+
+---
+
+### Task 19: `cli cleanup` command
+
+Deletes expired/revoked refresh tokens (platform and every tenant schema) and old `login_attempts` rows (platform only — tenant schemas never got their own `login_attempts` table; the spec keeps rate-limit history in one place regardless of scope). Meant to run on a schedule via systemd timer (wired up in Task 21). Tenant purge's 30-day safety window is already built into `Service.Purge` (Task 14) — nothing left to add there.
+
+No automated test for this file, consistent with the other CLI command files in this plan (`migrate.go`, `admin.go`, `tenant.go`, `permission.go`) — their correctness rides on the already-tested services underneath; this task is verified manually.
+
+**Files:**
+- Create: `cmd/cli/commands/cleanup.go`
+
+**Interfaces:**
+- Produces: CLI command `cli cleanup`
+
+- [ ] **Step 1: Implement cleanup.go**
+
+Create `cmd/cli/commands/cleanup.go`:
+```go
+package commands
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"go-api-starter/internal/config"
+	"go-api-starter/internal/database"
+)
+
+func init() {
+	Register("cleanup", cmdCleanup)
+}
+
+const loginAttemptRetention = 30 * 24 * time.Hour
+
+func cmdCleanup(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openRawDB(cfg.DB.DSN())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`DELETE FROM platform.refresh_tokens WHERE revoked_at IS NOT NULL OR expires_at < now()`); err != nil {
+		return fmt.Errorf("clean platform refresh_tokens: %w", err)
+	}
+	cutoff := time.Now().Add(-loginAttemptRetention)
+	if _, err := db.Exec(`DELETE FROM platform.login_attempts WHERE attempted_at < $1`, cutoff); err != nil {
+		return fmt.Errorf("clean platform login_attempts: %w", err)
+	}
+	fmt.Println("platform: cleaned")
+
+	targets, err := tenantSchemasToMigrate(db, true, "") // shared helper from migrate.go
+	if err != nil {
+		return err
+	}
+	for _, tgt := range targets {
+		if err := cleanupTenantSchema(db, tgt.schemaName); err != nil {
+			return fmt.Errorf("tenant %s: %w", tgt.code, err)
+		}
+		fmt.Printf("%-20s cleaned\n", tgt.code)
+	}
+	return nil
+}
+
+func cleanupTenantSchema(db *sql.DB, schemaName string) error {
+	if !database.ValidSchemaName(schemaName) {
+		return fmt.Errorf("invalid schema name %q", schemaName)
+	}
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`SET LOCAL search_path TO "` + schemaName + `"`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM refresh_tokens WHERE revoked_at IS NOT NULL OR expires_at < now()`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+```
+
+- [ ] **Step 2: Verify it builds**
+
+Run: `go build ./...`
+Expected: succeeds.
+
+- [ ] **Step 3: Manually verify**
+
+Run:
+```bash
+go run ./cmd/cli cleanup
+```
+Expected: prints `platform: cleaned` followed by one line per tenant. Running it against a freshly provisioned tenant with no expired tokens yet is a no-op — that's expected, not a bug.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add cmd/cli/commands/cleanup.go
+git commit -m "feat: cli cleanup command for expired refresh tokens and login attempts"
+```
+
+---
+
+### Task 20: Integration test — tenant isolation, end to end over real HTTP
+
+The test the spec calls the most important one in the repo: two tenants with **the same** data (same email address, on purpose) verified never to cross-contaminate — provisioned for real, logged into for real, driven entirely through the real HTTP router built by Task 18. Task 5 already proved `WithTenant` itself can't leak `search_path` across a rollback at the database layer; this test proves the same guarantee holds through the full stack a real client actually talks to.
+
+**Files:**
+- Test: `internal/server/tenant_isolation_test.go`
+
+**Interfaces:**
+- Consumes everything built in Tasks 5–18: no new production code, this task is pure test.
+
+- [ ] **Step 1: Write the test**
+
+Create `internal/server/tenant_isolation_test.go`:
+```go
+package server_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+	platformauth "go-api-starter/internal/modules/platform/auth"
+	platformtenant "go-api-starter/internal/modules/platform/tenant"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	tenantrole "go-api-starter/internal/modules/tenant/role"
+	tenantuser "go-api-starter/internal/modules/tenant/user"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/server"
+	"go-api-starter/internal/testsupport"
+)
+
+func buildTestApp(t *testing.T) (*fiber.App, *platformtenant.Service) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	if err := migration.MigratePlatformUp(pool.DB); err != nil {
+		t.Fatalf("MigratePlatformUp: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec("TRUNCATE platform.tenants, platform.login_attempts CASCADE")
+	})
+
+	platformPool := testsupport.OpenTestPlatformDB(t)
+	db := database.NewDB(pool)
+	tokens := auth.NewTokenManager("integration-test-secret", 15*time.Minute)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, 5, 15*time.Minute)
+
+	tenantRepo := platformtenant.NewRepository(platformPool, pool.DB)
+	tenantResolver := middleware.NewTenantResolver(tenantRepo, time.Minute)
+	tenantSvc := platformtenant.NewService(tenantRepo, pool.DB, tenantResolver)
+
+	roleSvc := tenantrole.NewService(db)
+	permCache := middleware.NewPermissionCache(roleSvc, time.Minute)
+
+	platformAuthSvc := platformauth.NewService(platformPool, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	tenantAuthSvc := tenantauth.NewService(db, tenantRepo, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	userSvc := tenantuser.NewService(tenantuser.NewRepository(db))
+
+	deps := server.Dependencies{
+		Tokens:          tokens,
+		TenantResolver:  tenantResolver,
+		PermissionCache: permCache,
+		PlatformAuth:    platformauth.NewHandler(platformAuthSvc),
+		TenantAuth:      tenantauth.NewHandler(tenantAuthSvc),
+		TenantUser:      tenantuser.NewHandler(userSvc),
+	}
+	app := server.NewRouter(deps, []string{"http://localhost:5173"})
+	return app, tenantSvc
+}
+
+func doJSON(t *testing.T, app *fiber.App, method, path string, body any, token string) (*http.Response, map[string]any) {
+	t.Helper()
+	reader := bytes.NewReader(nil)
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := app.Test(req, -1) // -1: no timeout — these steps hit real Postgres
+	if err != nil {
+		t.Fatalf("app.Test %s %s: %v", method, path, err)
+	}
+	var parsed map[string]any
+	json.NewDecoder(resp.Body).Decode(&parsed)
+	return resp, parsed
+}
+
+func loginAsOwner(t *testing.T, app *fiber.App, tenantCode, email, password string) string {
+	t.Helper()
+	resp, body := doJSON(t, app, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"tenant_code": tenantCode, "email": email, "password": password,
+	}, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("login for %s failed: status=%d body=%v", tenantCode, resp.StatusCode, body)
+	}
+	data := body["data"].(map[string]any)
+	return data["access_token"].(string)
+}
+
+func TestTenantIsolation_AcrossTwoTenantsWithSimilarData(t *testing.T) {
+	app, tenantSvc := buildTestApp(t)
+	ctx := context.Background()
+
+	codeA := "acme_" + testsupport.RandomSchemaName()
+	codeB := "globex_" + testsupport.RandomSchemaName()
+	t.Cleanup(func() { dropTestSchema(t, codeA) })
+	t.Cleanup(func() { dropTestSchema(t, codeB) })
+
+	resA, err := tenantSvc.Provision(ctx, platformtenant.ProvisionInput{
+		Code: codeA, Name: "Acme Corp", OwnerEmail: "owner@acme.test",
+	})
+	if err != nil {
+		t.Fatalf("Provision tenant A: %v", err)
+	}
+	resB, err := tenantSvc.Provision(ctx, platformtenant.ProvisionInput{
+		Code: codeB, Name: "Globex Corp", OwnerEmail: "owner@globex.test",
+	})
+	if err != nil {
+		t.Fatalf("Provision tenant B: %v", err)
+	}
+
+	tokenA := loginAsOwner(t, app, codeA, "owner@acme.test", resA.OwnerPassword)
+	tokenB := loginAsOwner(t, app, codeB, "owner@globex.test", resB.OwnerPassword)
+
+	// Same email on purpose — if isolation ever breaks, a unique-index
+	// collision or cross-visibility here is exactly how it would surface.
+	respA, bodyA := doJSON(t, app, http.MethodPost, "/api/v1/users", map[string]string{
+		"email": "staff@example.com", "password": "correct-horse-battery", "name": "Staff A",
+	}, tokenA)
+	if respA.StatusCode != 201 {
+		t.Fatalf("create user in tenant A failed: status=%d body=%v", respA.StatusCode, bodyA)
+	}
+	staffAID := bodyA["data"].(map[string]any)["id"].(string)
+
+	respB, bodyB := doJSON(t, app, http.MethodPost, "/api/v1/users", map[string]string{
+		"email": "staff@example.com", "password": "correct-horse-battery", "name": "Staff B",
+	}, tokenB)
+	if respB.StatusCode != 201 {
+		t.Fatalf("create user in tenant B (same email, different tenant) failed: status=%d body=%v", respB.StatusCode, bodyB)
+	}
+
+	_, listA := doJSON(t, app, http.MethodGet, "/api/v1/users?limit=100", nil, tokenA)
+	assertNamesPresentAbsent(t, listA, []string{"Staff A"}, []string{"Staff B"})
+
+	_, listB := doJSON(t, app, http.MethodGet, "/api/v1/users?limit=100", nil, tokenB)
+	assertNamesPresentAbsent(t, listB, []string{"Staff B"}, []string{"Staff A"})
+
+	// The strongest check: tenant B, holding tenant A's own user ID,
+	// cannot fetch it — WithTenant scopes every query to the caller's
+	// schema regardless of which ID is asked for.
+	respCross, _ := doJSON(t, app, http.MethodGet, "/api/v1/users/"+staffAID, nil, tokenB)
+	if respCross.StatusCode != 404 {
+		t.Errorf("tenant B fetched tenant A's user by ID: status=%d, want 404", respCross.StatusCode)
+	}
+}
+
+func assertNamesPresentAbsent(t *testing.T, body map[string]any, present, absent []string) {
+	t.Helper()
+	data, ok := body["data"].([]any)
+	if !ok {
+		t.Fatalf("response has no data array: %v", body)
+	}
+	names := map[string]bool{}
+	for _, item := range data {
+		row := item.(map[string]any)
+		names[row["name"].(string)] = true
+	}
+	for _, want := range present {
+		if !names[want] {
+			t.Errorf("expected %q in list, got names: %v", want, names)
+		}
+	}
+	for _, unwanted := range absent {
+		if names[unwanted] {
+			t.Errorf("found %q in list — cross-tenant leak, got names: %v", unwanted, names)
+		}
+	}
+}
+
+func dropTestSchema(t *testing.T, schemaName string) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	pool.Exec(`DROP SCHEMA IF EXISTS "` + schemaName + `" CASCADE`)
+}
+```
+
+- [ ] **Step 2: Run the test**
+
+Run: `go test ./internal/server/... -run TenantIsolation -v`
+Expected: PASS. This test is slow (two full provisions, each running four tenant migrations) — several seconds is normal.
+
+If it fails, **stop and treat it as the highest-priority bug in the whole codebase** — this is the one guarantee the entire architecture exists to provide.
+
+- [ ] **Step 3: Run the full test suite**
+
+Run: `go test ./... -v`
+Expected: every test written across Tasks 2–20 passes.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/server/tenant_isolation_test.go
+git commit -m "test: end-to-end tenant isolation across two tenants with identical data"
+```
+
+---
+
+### Task 21: Deployment artifacts, `CLAUDE.md`, and documentation
+
+Docs are written now, once, against the finished code — not earlier and incrementally against a moving target. That's a deliberate choice: the spec's rule is "documentation always matches the code," and writing it after Task 20 is the only point in this plan where that's true by construction. (`README.md` stays out of scope per the spec — it's written after the starter is used to build something real.)
+
+**Files:**
+- Create: `deploy/app-api.service`
+- Create: `deploy/app-cleanup.service`
+- Create: `deploy/app-cleanup.timer`
+- Create: `deploy/pg-backup.service`
+- Create: `deploy/pg-backup.timer`
+- Create: `deploy/pg-backup.sh`
+- Create: `deploy/Caddyfile`
+- Create: `deploy/deploy.sh`
+- Create: `CLAUDE.md`
+- Create: `docs/getting-started.md`
+- Create: `docs/adding-a-module.md`
+- Create: `docs/multi-tenancy.md`
+- Create: `docs/database-conventions.md`
+- Create: `docs/deployment.md`
+
+- [ ] **Step 1: Write the systemd units**
+
+Create `deploy/app-api.service`:
+```ini
+[Unit]
+Description=App API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=app
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/api
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Create `deploy/app-cleanup.service`:
+```ini
+[Unit]
+Description=Run cli cleanup (expired tokens, old login attempts)
+
+[Service]
+Type=oneshot
+User=app
+WorkingDirectory=/opt/app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/cli cleanup
+```
+
+Create `deploy/app-cleanup.timer`:
+```ini
+[Unit]
+Description=Daily cli cleanup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Create `deploy/pg-backup.service`:
+```ini
+[Unit]
+Description=PostgreSQL backup
+
+[Service]
+Type=oneshot
+User=app
+EnvironmentFile=/etc/app/api.env
+ExecStart=/opt/app/deploy/pg-backup.sh
+```
+
+Create `deploy/pg-backup.timer`:
+```ini
+[Unit]
+Description=Daily PostgreSQL backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+- [ ] **Step 2: Write the backup script**
+
+Create `deploy/pg-backup.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+BACKUP_DIR="/var/backups/app-db"
+mkdir -p "$BACKUP_DIR"
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+FILE="$BACKUP_DIR/appdb-$TIMESTAMP.dump"
+
+pg_dump -Fc -h "${DB_HOST:-localhost}" -U "${DB_USER:-app}" "${DB_NAME:-appdb}" > "$FILE"
+
+# Keep 35 days locally; the real retention policy lives wherever this gets
+# copied to off-server.
+find "$BACKUP_DIR" -name "appdb-*.dump" -mtime +35 -delete
+
+echo "backup written: $FILE"
+echo "REMINDER: this backup is only useful if it is copied off this server"
+echo "          (rsync/rclone to remote storage) and restore has been tested."
+```
+
+- [ ] **Step 3: Write the Caddy config**
+
+Create `deploy/Caddyfile`:
+```
+{$APP_DOMAIN} {
+    handle /api/* {
+        reverse_proxy localhost:8080
+    }
+    handle {
+        root * /var/www/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}
+```
+
+- [ ] **Step 4: Write the deploy script**
+
+Create `deploy/deploy.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /opt/app
+
+echo "==> pulling latest code"
+git pull
+
+echo "==> backing up current binaries"
+cp -f api api.backup 2>/dev/null || true
+cp -f cli cli.backup 2>/dev/null || true
+
+echo "==> building"
+go build -o api ./cmd/api
+go build -o cli ./cmd/cli
+
+echo "==> migrating platform schema"
+./cli migrate platform up
+
+echo "==> migrating tenant schemas"
+./cli migrate tenant up --all
+
+echo "==> syncing permissions"
+./cli permission sync --all
+
+echo "==> restarting service"
+sudo systemctl restart app-api
+
+echo "==> done"
+```
+
+Mark it executable:
+```bash
+chmod +x deploy/deploy.sh deploy/pg-backup.sh
+```
+
+- [ ] **Step 5: Write `CLAUDE.md`**
+
+Create `CLAUDE.md`:
+```markdown
+# CLAUDE.md
+
+Rules for working in this repository. Breaking any of these has a real
+consequence — usually data leaking across tenants — not just a style nit.
+
+## Multi-tenancy (see `docs/multi-tenancy.md` for the full explanation)
+
+- **Every tenant data query goes through `database.WithTenant(ctx, fn)`.**
+  No repository holds a bare `*sqlx.DB` for tenant tables. No exceptions.
+- **`*fiber.Ctx` never leaves the handler layer.** Services and
+  repositories take `context.Context` only. Fiber is built on `fasthttp`,
+  which reuses request objects across requests — anything that escapes the
+  handler with a live `*fiber.Ctx` reference can end up reading a
+  different request's (possibly a different tenant's) data.
+- **Every `sort` query parameter is validated against an explicit
+  whitelist** (`pagination.Parse` + a module's `Sortable` map) before it's
+  interpolated into `ORDER BY`. Never pass a raw query value into SQL,
+  even indirectly.
+
+## Module boundaries
+
+- **A module never calls another module's repository directly.**
+  Cross-module interaction goes through the other module's *service*.
+- New tenant-scoped modules copy the shape of
+  `internal/modules/tenant/user/` — see `docs/adding-a-module.md`.
+
+## Errors and responses
+
+- Services return `*apperror.Error`, never a bare `error` wrapping a
+  driver error straight to the client.
+- Handlers never call `c.Status(...)` themselves — `response.Success` /
+  `response.Error` own that.
+
+## Database
+
+- IDs are generated in Go (`uuid.New()`), never as a DB-side default —
+  see `docs/database-conventions.md` for why.
+- New tables follow the audit-column convention in
+  `docs/database-conventions.md`, unless they're a join table or a
+  log/token table (the two documented exceptions).
+
+## Testing
+
+- Integration tests use `testsupport.OpenTestDB` / `OpenTestPlatformDB`,
+  backed by a local `app_test` PostgreSQL database — never Docker, never
+  testcontainers.
+- Tests that create a schema must drop it in `t.Cleanup`.
+```
+
+- [ ] **Step 6: Write `docs/getting-started.md`**
+
+Create `docs/getting-started.md`:
+```markdown
+# Getting Started (Windows development)
+
+## 1. Install prerequisites
+
+- Go 1.22+
+- PostgreSQL, running locally
+- `air` for hot reload: `go install github.com/air-verse/air@latest`
+
+## 2. Create the databases
+
+```powershell
+psql -U postgres -c "CREATE ROLE app LOGIN PASSWORD 'changeme';"
+psql -U postgres -c "CREATE DATABASE appdb OWNER app;"
+psql -U postgres -c "CREATE DATABASE app_test OWNER app;"
+```
+
+## 3. Configure environment
+
+```powershell
+copy .env.example .env
+copy .env.test.example .env.test
+```
+Adjust `DB_PASSWORD` in both files if you used a different password above.
+
+## 4. Run migrations and create your first admin
+
+```powershell
+go run ./cmd/cli migrate platform up
+go run ./cmd/cli admin create --email=you@example.com --name="Your Name"
+```
+Copy the printed password — it's shown once.
+
+## 5. Create your first tenant
+
+```powershell
+go run ./cmd/cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=owner@acme.test
+```
+Copy the printed owner password too.
+
+## 6. Run the API
+
+```powershell
+air
+```
+or without hot reload:
+```powershell
+go run ./cmd/api
+```
+
+## 7. Try it
+
+```powershell
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/api/v1/auth/login -H "Content-Type: application/json" -d "{\"tenant_code\":\"acme_corp\",\"email\":\"owner@acme.test\",\"password\":\"<owner password>\"}"
+```
+
+## Running tests
+
+```powershell
+go test ./...
+```
+Integration tests connect to `app_test` using `.env.test` and are skipped
+automatically if PostgreSQL isn't reachable.
+```
+
+- [ ] **Step 7: Write `docs/adding-a-module.md`**
+
+Create `docs/adding-a-module.md`:
+```markdown
+# Adding a Module
+
+Every tenant-scoped module follows the shape of
+`internal/modules/tenant/user/` — copy that folder as your starting point.
+
+## File shape
+
+```
+modules/tenant/<name>/
+  model.go       # DB row struct(s), `db:"..."` tags
+  dto.go         # request/response structs, `json:"..."` + `validate:"..."` tags
+  repository.go  # SQL via sqlx, always through database.WithTenant
+  service.go     # business logic, context.Context only, no HTTP types
+  handler.go     # Fiber only, converts to/from DTOs, never touches SQL
+```
+
+## Steps
+
+1. **Add a migration.** Create
+   `internal/migration/tenant/0000N_create_<name>_table.up.sql` (and
+   `.down.sql`), following `database-conventions.md` for audit columns and
+   soft delete. Bump the version number.
+2. **Write `model.go`** — one struct per table, `db:"..."` tags matching
+   column names exactly.
+3. **Write `repository.go`** — every method wraps its query in
+   `db.WithTenant(ctx, func(tx *sqlx.Tx) error {...})`. Declare a
+   `Sortable map[string]string` whitelist for anything the list endpoint
+   can sort by — never accept a raw `sort` query value.
+4. **Write `dto.go`** — request structs with `validate:"..."` tags, a
+   `View` struct for responses, and a `toView` mapper.
+5. **Write `service.go`** — depends only on the repository and
+   `context.Context`. Password hashing, external calls, or cross-module
+   calls (via another module's *service*, never its repository) go here.
+6. **Write `handler.go`** — parse the body, call `validator.Validate`,
+   call the service, translate the result with `response.Success` /
+   `response.Error`. Never write `c.Status(...)` directly.
+7. **Add permission constants** in `internal/permission/constants.go` for
+   the new resource (`<name>.view`, `<name>.create`, ...), following the
+   existing `user.*` ones.
+8. **Wire routes** in `internal/server/router.go`, inside the `tenantAPI`
+   group, each behind
+   `middleware.RequirePermission(permission.YourConstant, deps.PermissionCache)`.
+9. **Add the handler to `server.Dependencies`** and construct it in
+   `cmd/api/main.go`.
+10. **Run `cli permission sync --all`** after deploying, so existing
+    tenants get the new permission rows.
+
+## Sub-grouping modules
+
+Keep `modules/tenant/` flat until it holds 7–8 modules and navigation gets
+hard. Then group by domain, e.g. `modules/tenant/sales/order/`,
+`modules/tenant/inventory/product/` — the module itself doesn't change
+shape, only its path. **Modules must not call another module's repository
+directly** — cross-module interaction always goes through the other
+module's *service*.
+```
+
+- [ ] **Step 8: Write `docs/multi-tenancy.md`**
+
+Create `docs/multi-tenancy.md`:
+```markdown
+# Multi-Tenancy Rules
+
+These two rules are what keep tenant A's data from ever appearing in
+tenant B's response. Breaking either one is a data breach, not a bug.
+
+## Rule 1: all tenant data access goes through `database.WithTenant`
+
+```go
+// Right
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
+	var u User
+	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
+		return tx.Get(&u, `SELECT * FROM users WHERE id = $1`, id)
+	})
+	return u, err
+}
+```
+```go
+// Wrong — bypasses tenant scoping entirely
+func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
+	var u User
+	err := r.pool.Get(&u, `SELECT * FROM users WHERE id = $1`, id) // which tenant?!
+	return u, err
+}
+```
+`WithTenant` runs your query inside a transaction with `SET LOCAL
+search_path` pinned to the calling tenant's schema — resolved from
+`context.Context`, never from a request parameter. `SET LOCAL` is
+automatically cleared when the transaction ends (commit or rollback), so a
+connection can never carry one tenant's schema into the next caller that
+borrows it from the pool.
+
+## Rule 2: `*fiber.Ctx` stops at the handler
+
+Fiber is built on `fasthttp`, which **reuses** its context objects between
+requests for performance. If a `*fiber.Ctx` (or anything derived from it)
+escapes into a goroutine or gets stored anywhere, it can be silently
+overwritten by a completely different request — including a different
+tenant's — before it's read back.
+
+```go
+// Right — handler converts everything it needs before calling the service
+func (h *Handler) Get(c *fiber.Ctx) error {
+	id, _ := uuid.Parse(c.Params("id"))
+	view, err := h.svc.Get(c.UserContext(), id) // context.Context only, from here down
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, view)
+}
+```
+```go
+// Wrong — never do this
+func (h *Handler) Get(c *fiber.Ctx) error {
+	go func() {
+		log.Println(c.Params("id")) // c may belong to a different request by now
+	}()
+	return nil
+}
+```
+Services and repositories only ever see `context.Context`. This isn't just
+a safety rule — it also means business logic can be unit tested without
+starting an HTTP server.
+
+## What ends up in `context.Context`
+
+Set by middleware, read via `database.TenantFromContext` /
+`database.ActorFromContext`:
+- `database.TenantInfo` — tenant ID + schema name, set by `RequireTenant`
+- `database.Actor` — user ID + scope, set by `RequirePlatform` /
+  `RequireTenant`
+
+The one exception is login: there's no token yet to prove tenant identity,
+so `modules/tenant/auth.Service.Login` constructs `TenantInfo` itself from
+the resolved `tenant_code`, before calling `WithTenant`. Every other
+tenant-scoped code path receives it already set by middleware.
+```
+
+- [ ] **Step 9: Write `docs/database-conventions.md`**
+
+Create `docs/database-conventions.md`:
+```markdown
+# Database Conventions
+
+## Every table (with two exceptions below)
+
+```sql
+created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+deleted_at  TIMESTAMPTZ NULL
+created_by  UUID NULL
+updated_by  UUID NULL
+deleted_by  UUID NULL
+```
+
+- `updated_at` is maintained by a per-schema trigger
+  (`trigger_set_updated_at`) — attach it to every new table:
+  ```sql
+  CREATE TRIGGER set_updated_at
+      BEFORE UPDATE ON your_table
+      FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+  ```
+- `*_by` columns are filled from `database.ActorFromContext(ctx)` in the
+  repository layer, never left for the database to guess.
+- IDs are `UUID PRIMARY KEY` with **no database default** — generate with
+  `uuid.New()` in Go before inserting. (A `SET LOCAL search_path`
+  transaction only searches the tenant's own schema, not `public`, so a
+  DB-side default calling an extension function there would fail
+  unpredictably. Generating in Go sidesteps the problem entirely.)
+
+## Soft delete
+
+Every query filters `WHERE deleted_at IS NULL` unless it's specifically
+looking for deleted rows (like `tenant purge`'s 30-day check). Any column
+with a uniqueness requirement needs a **partial** unique index so a
+deleted row's value can be reused:
+```sql
+CREATE UNIQUE INDEX users_email_key ON users (email) WHERE deleted_at IS NULL;
+```
+
+## Exceptions
+
+**Join tables** (`role_permissions`, `user_roles`): only `created_at` +
+`created_by`. Access is revoked with a hard `DELETE`, not a soft delete —
+stacking `deleted_at IS NULL` filters onto every permission check for no
+benefit isn't worth it, and grant/revoke history belongs in logs, not in
+the join table.
+
+**Log/token tables** (`refresh_tokens`, `login_attempts`): only
+`created_at`. They're append-only — nothing ever updates or soft-deletes a
+row in them. A revoked refresh token is represented by its own
+`revoked_at` column, not the standard `deleted_at`.
+
+## Naming
+
+- Tables: plural, `snake_case` (`users`, `role_permissions`).
+- Columns: `snake_case`, no type prefixes (`email`, not `str_email`).
+- Foreign keys: `<singular_table>_id` (`user_id`, `role_id`).
+```
+
+- [ ] **Step 10: Write `docs/deployment.md`**
+
+Create `docs/deployment.md`:
+```markdown
+# Deployment
+
+No Docker anywhere in this stack — Go compiles to one static binary, so
+the server needs nothing beyond that binary, PostgreSQL, and Caddy.
+
+## Layout on the server
+
+```
+/opt/app/
+  api               # HTTP server binary
+  cli               # CLI binary (migrations, provisioning, cleanup)
+  api.backup        # previous binary, for instant rollback
+
+/etc/app/api.env    # config, chmod 600
+/etc/systemd/system/app-api.service
+/etc/systemd/system/app-cleanup.service
+/etc/systemd/system/app-cleanup.timer
+```
+
+## First-time setup
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin app
+sudo mkdir -p /opt/app /etc/app
+sudo chown app:app /opt/app
+git clone <your-repo-url> /opt/app
+sudo cp deploy/app-api.service deploy/app-cleanup.service deploy/app-cleanup.timer /etc/systemd/system/
+sudo cp .env.example /etc/app/api.env   # then edit it with real values
+sudo chmod 600 /etc/app/api.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now app-cleanup.timer
+```
+
+Install Caddy, then:
+```bash
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # edit the domain first
+sudo systemctl reload caddy
+```
+
+### Ubuntu/Debian vs Rocky
+
+Package manager differs (`apt install postgresql caddy` vs
+`dnf install postgresql-server caddy`); everything else — systemd units,
+the Go binary, the deploy script — is identical.
+
+**Rocky-specific:** SELinux is enabled by default and blocks Caddy from
+connecting to `localhost:8080` unless told otherwise:
+```bash
+sudo setsebool -P httpd_can_network_connect 1
+```
+Without this, requests through Caddy fail with a "Permission denied" that
+has nothing obviously to do with SELinux — if Caddy can't reach the API on
+Rocky, this is the first thing to check.
+
+## Deploying an update
+
+```bash
+cd /opt/app
+./deploy/deploy.sh
+```
+This pulls, backs up the current binaries, rebuilds, runs platform +
+tenant migrations, syncs permissions, and restarts the service. Expect
+1–2 seconds of downtime at the restart — schedule deploys outside business
+hours for apps with fixed operating hours (like POS).
+
+### Rollback
+
+```bash
+cp api.backup api && sudo systemctl restart app-api
+```
+
+## Backups
+
+```bash
+sudo cp deploy/pg-backup.service deploy/pg-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pg-backup.timer
+```
+This runs `pg_dump` daily and keeps 35 days locally. **Copy backups off
+the server** (rsync/rclone to remote storage) — a backup on the same disk
+that fails doesn't protect you. Test a restore periodically; an untested
+backup is a guess, not a backup.
+
+## Environment variables
+
+See `.env.example` for the full list. All of them are readable/writable
+without a rebuild — edit `/etc/app/api.env` and `systemctl restart app-api`.
+```
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add deploy CLAUDE.md docs/getting-started.md docs/adding-a-module.md docs/multi-tenancy.md docs/database-conventions.md docs/deployment.md
+git commit -m "docs: deployment artifacts, CLAUDE.md, and full documentation set"
+```
+
+---
+
+### Task 22: OpenAPI documentation via `swaggo/swag`
+
+Closes the one item from the spec's stack table with no task behind it yet: `swaggo/swag` generates OpenAPI docs from comments directly above each handler, so the docs can't drift far from the code without `swag init` visibly failing to compile against it.
+
+**Files:**
+- Modify: `cmd/api/main.go` — add general API annotations
+- Modify: `internal/modules/platform/auth/handler.go` — add annotations
+- Modify: `internal/modules/tenant/auth/handler.go` — add annotations
+- Modify: `internal/modules/tenant/user/handler.go` — add annotations
+- Modify: `internal/server/router.go` — serve the generated spec
+- Modify: `Makefile` — add `make swagger`
+- Create: `docs/swagger/` (generated, not hand-written)
+
+- [ ] **Step 1: Install the swag CLI and add the runtime dependency**
+
+Run:
+```bash
+go install github.com/swaggo/swag/cmd/swag@latest
+go get github.com/gofiber/swagger
+go get github.com/swaggo/swag
+```
+
+- [ ] **Step 2: Add general API annotations to `main.go`**
+
+Modify `cmd/api/main.go` — add this comment block immediately above `package main`:
+```go
+// @title           App API
+// @version         1.0
+// @description     Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.
+// @BasePath        /api/v1
+package main
+```
+
+- [ ] **Step 3: Annotate the platform auth handlers**
+
+Modify `internal/modules/platform/auth/handler.go` — add a comment block directly above each method:
+```go
+// Login godoc
+// @Summary      Admin login
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LoginRequest true "credentials"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /admin/auth/login [post]
+func (h *Handler) Login(c *fiber.Ctx) error {
+```
+```go
+// Refresh godoc
+// @Summary      Refresh an admin access token
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body RefreshRequest true "refresh token"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /admin/auth/refresh [post]
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+```
+```go
+// Logout godoc
+// @Summary      Revoke an admin refresh token
+// @Tags         platform-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LogoutRequest true "refresh token"
+// @Success      200 {object} map[string]any
+// @Router       /admin/auth/logout [post]
+func (h *Handler) Logout(c *fiber.Ctx) error {
+```
+(Replace the bare `func (h *Handler) Login(c *fiber.Ctx) error {` lines already in the file with these annotated versions — the method bodies underneath are unchanged from Task 12.)
+
+- [ ] **Step 4: Annotate the tenant auth handlers**
+
+Modify `internal/modules/tenant/auth/handler.go` the same way:
+```go
+// Login godoc
+// @Summary      Tenant staff login
+// @Tags         tenant-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LoginRequest true "tenant_code, credentials"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /auth/login [post]
+func (h *Handler) Login(c *fiber.Ctx) error {
+```
+```go
+// Refresh godoc
+// @Summary      Refresh a tenant access token
+// @Tags         tenant-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body RefreshRequest true "tenant_code, refresh token"
+// @Success      200 {object} LoginResponse
+// @Failure      401 {object} map[string]any
+// @Router       /auth/refresh [post]
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+```
+```go
+// Logout godoc
+// @Summary      Revoke a tenant refresh token
+// @Tags         tenant-auth
+// @Accept       json
+// @Produce      json
+// @Param        body body LogoutRequest true "tenant_code, refresh token"
+// @Success      200 {object} map[string]any
+// @Router       /auth/logout [post]
+func (h *Handler) Logout(c *fiber.Ctx) error {
+```
+
+- [ ] **Step 5: Annotate the tenant user handlers**
+
+Modify `internal/modules/tenant/user/handler.go`:
+```go
+// Create godoc
+// @Summary      Create a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        body body CreateRequest true "new user"
+// @Success      201 {object} View
+// @Failure      422 {object} map[string]any
+// @Router       /users [post]
+func (h *Handler) Create(c *fiber.Ctx) error {
+```
+```go
+// Get godoc
+// @Summary      Get a tenant user by ID
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        id path string true "user id"
+// @Success      200 {object} View
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [get]
+func (h *Handler) Get(c *fiber.Ctx) error {
+```
+```go
+// List godoc
+// @Summary      List tenant users
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        page query int false "page number"
+// @Param        limit query int false "page size, max 100"
+// @Param        sort query string false "created_at, name, or email"
+// @Param        order query string false "asc or desc"
+// @Success      200 {object} map[string]any
+// @Router       /users [get]
+func (h *Handler) List(c *fiber.Ctx) error {
+```
+```go
+// Update godoc
+// @Summary      Update a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        id path string true "user id"
+// @Param        body body UpdateRequest true "fields to change"
+// @Success      200 {object} map[string]any
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [patch]
+func (h *Handler) Update(c *fiber.Ctx) error {
+```
+```go
+// Delete godoc
+// @Summary      Soft-delete a tenant user
+// @Tags         users
+// @Security     BearerAuth
+// @Produce      json
+// @Param        id path string true "user id"
+// @Success      200 {object} map[string]any
+// @Failure      404 {object} map[string]any
+// @Router       /users/{id} [delete]
+func (h *Handler) Delete(c *fiber.Ctx) error {
+```
+
+- [ ] **Step 6: Generate the spec**
+
+Run:
+```bash
+swag init -g cmd/api/main.go -o docs/swagger
+```
+Expected: creates `docs/swagger/docs.go`, `swagger.json`, `swagger.yaml`.
+
+- [ ] **Step 7: Serve it**
+
+Modify `internal/server/router.go` — add to the import block:
+```go
+swaggerui "github.com/gofiber/swagger"
+_ "go-api-starter/docs/swagger" // generated by `swag init`; registers the spec swaggerui reads
+```
+and add, right after `app := fiber.New(...)` and before the middleware chain:
+```go
+app.Get("/swagger/*", swaggerui.HandlerDefault)
+```
+
+- [ ] **Step 8: Add the Makefile target**
+
+Modify `Makefile` — add:
+```makefile
+swagger:
+	swag init -g cmd/api/main.go -o docs/swagger
+```
+and add `swagger` to the `.PHONY` line.
+
+- [ ] **Step 9: Verify it builds and serves**
+
+Run:
+```bash
+go build ./...
+go run ./cmd/api
+```
+Then open `http://localhost:8080/swagger/index.html` in a browser.
+Expected: the Swagger UI loads and lists every annotated endpoint, grouped by tag (`platform-auth`, `tenant-auth`, `users`).
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add cmd/api internal/modules internal/server docs/swagger Makefile go.mod go.sum
+git commit -m "docs: OpenAPI documentation via swaggo/swag"
+```
+
+---
+
+## Final Verification
+
+- [ ] Run `go build ./...` — succeeds with no errors.
+- [ ] Run `go vet ./...` — no warnings.
+- [ ] Run `go test ./...` — every test from Tasks 2–20 passes.
+- [ ] Run the manual smoke test from Task 18, Step 8, start to finish on a clean database.
+- [ ] Open `http://localhost:8080/swagger/index.html` and confirm every endpoint is listed (Task 22).
+- [ ] Confirm `git log --oneline` shows one commit per task, each with passing tests at that point in history.
