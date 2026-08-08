@@ -3612,3 +3612,487 @@ git commit -m "feat: login attempt rate limiting backed by platform.login_attemp
 ```
 
 ---
+
+### Tugas 11: Middleware auth — `RequirePlatform` / `RequireTenant`, cache tenant resolver, pengaman migrasi
+
+**Catatan desain:** `TenantLookup` dideklarasikan di sini, di sisi konsumen, jadi `internal/middleware` tidak pernah meng-import `modules/platform/tenant` — Tugas 14 yang mengimplementasikan interface-nya. Satu panggilan lookup yang sama melaporkan status tenant sekaligus versi migrasi schema tenant dalam satu round trip, karena keduanya di-cache bersama dengan TTL yang sama dan sama-sama menjaga keputusan yang sama ("bolehkah request ini lanjut terhadap data tenant ini").
+
+**Berkas:**
+- Buat: `internal/middleware/tenantresolver.go`
+- Buat: `internal/middleware/auth.go`
+- Test: `internal/middleware/tenantresolver_test.go`
+- Test: `internal/middleware/auth_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - Struct `middleware.TenantRecord { TenantID uuid.UUID; SchemaName string; Status string; SchemaVersion uint; SchemaDirty bool }`
+  - `middleware.TenantLookup interface { FindByID(ctx, tenantID uuid.UUID) (TenantRecord, error) }` — diimplementasikan Tugas 14.
+  - `middleware.NewTenantResolver(lookup TenantLookup, ttl time.Duration) *TenantResolver`
+  - `(r *TenantResolver) Resolve(ctx, tenantID uuid.UUID) (TenantRecord, error)`
+  - `(r *TenantResolver) Invalidate(tenantID uuid.UUID)`
+  - `middleware.RequirePlatform(tm *auth.TokenManager) fiber.Handler`
+  - `middleware.RequireTenant(tm *auth.TokenManager, resolver *TenantResolver) fiber.Handler`
+
+- [ ] **Langkah 1: Tulis test tenant resolver yang gagal**
+
+Buat `internal/middleware/tenantresolver_test.go`:
+```go
+package middleware_test
+
+import (
+	"context"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"go-api-starter/internal/middleware"
+)
+
+type fakeTenantLookup struct {
+	calls  int32
+	record middleware.TenantRecord
+	err    error
+}
+
+func (f *fakeTenantLookup) FindByID(ctx context.Context, tenantID uuid.UUID) (middleware.TenantRecord, error) {
+	atomic.AddInt32(&f.calls, 1)
+	return f.record, f.err
+}
+
+func TestTenantResolver_CachesWithinTTL(t *testing.T) {
+	tenantID := uuid.New()
+	fake := &fakeTenantLookup{record: middleware.TenantRecord{TenantID: tenantID, SchemaName: "acme_corp", Status: "active"}}
+	resolver := middleware.NewTenantResolver(fake, time.Minute)
+
+	for i := 0; i < 3; i++ {
+		if _, err := resolver.Resolve(context.Background(), tenantID); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+	}
+	if fake.calls != 1 {
+		t.Errorf("underlying lookup called %d times, want 1 (should be served from cache)", fake.calls)
+	}
+}
+
+func TestTenantResolver_RefetchesAfterTTL(t *testing.T) {
+	tenantID := uuid.New()
+	fake := &fakeTenantLookup{record: middleware.TenantRecord{TenantID: tenantID, SchemaName: "acme_corp", Status: "active"}}
+	resolver := middleware.NewTenantResolver(fake, 10*time.Millisecond)
+
+	resolver.Resolve(context.Background(), tenantID)
+	time.Sleep(20 * time.Millisecond)
+	resolver.Resolve(context.Background(), tenantID)
+
+	if fake.calls != 2 {
+		t.Errorf("underlying lookup called %d times, want 2 (TTL should have expired)", fake.calls)
+	}
+}
+
+func TestTenantResolver_InvalidateForcesRefetch(t *testing.T) {
+	tenantID := uuid.New()
+	fake := &fakeTenantLookup{record: middleware.TenantRecord{TenantID: tenantID, SchemaName: "acme_corp", Status: "active"}}
+	resolver := middleware.NewTenantResolver(fake, time.Minute)
+
+	resolver.Resolve(context.Background(), tenantID)
+	resolver.Invalidate(tenantID)
+	resolver.Resolve(context.Background(), tenantID)
+
+	if fake.calls != 2 {
+		t.Errorf("underlying lookup called %d times, want 2 (Invalidate should force a refetch)", fake.calls)
+	}
+}
+```
+
+- [ ] **Langkah 2: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -run TenantResolver -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 3: Implementasikan tenantresolver.go**
+
+Buat `internal/middleware/tenantresolver.go`:
+```go
+package middleware
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type TenantRecord struct {
+	TenantID      uuid.UUID
+	SchemaName    string
+	Status        string // provisioning | active | suspended
+	SchemaVersion uint
+	SchemaDirty   bool
+}
+
+// TenantLookup is implemented by the platform tenant service (Task 13).
+// Declared here, on the consumer side, so this package never imports
+// modules/platform/tenant.
+type TenantLookup interface {
+	FindByID(ctx context.Context, tenantID uuid.UUID) (TenantRecord, error)
+}
+
+type cacheEntry struct {
+	record  TenantRecord
+	expires time.Time
+}
+
+// TenantResolver caches tenant lookups for ttl so RequireTenant doesn't hit
+// the database on every request. This is the "asumsi single instance" cache
+// from the design spec: pencabutan/perubahan status only becomes visible
+// on other instances after ttl elapses (or immediately on this instance if
+// Invalidate is called) — acceptable as long as the app runs as one
+// process; a multi-instance deployment would need this moved to Redis.
+type TenantResolver struct {
+	lookup TenantLookup
+	ttl    time.Duration
+	mu     sync.RWMutex
+	cache  map[uuid.UUID]cacheEntry
+}
+
+func NewTenantResolver(lookup TenantLookup, ttl time.Duration) *TenantResolver {
+	return &TenantResolver{lookup: lookup, ttl: ttl, cache: make(map[uuid.UUID]cacheEntry)}
+}
+
+func (r *TenantResolver) Resolve(ctx context.Context, tenantID uuid.UUID) (TenantRecord, error) {
+	r.mu.RLock()
+	entry, ok := r.cache[tenantID]
+	r.mu.RUnlock()
+	if ok && time.Now().Before(entry.expires) {
+		return entry.record, nil
+	}
+
+	rec, err := r.lookup.FindByID(ctx, tenantID)
+	if err != nil {
+		return TenantRecord{}, err
+	}
+
+	r.mu.Lock()
+	r.cache[tenantID] = cacheEntry{record: rec, expires: time.Now().Add(r.ttl)}
+	r.mu.Unlock()
+	return rec, nil
+}
+
+// Invalidate drops tenantID from the cache. Call this whenever a tenant's
+// status changes (suspend/activate/delete, Task 13) so the change is
+// visible on this instance's very next request instead of waiting out ttl.
+func (r *TenantResolver) Invalidate(tenantID uuid.UUID) {
+	r.mu.Lock()
+	delete(r.cache, tenantID)
+	r.mu.Unlock()
+}
+```
+
+- [ ] **Langkah 4: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -run TenantResolver -v`
+Hasil: PASS — ketiga test lolos.
+
+- [ ] **Langkah 5: Tulis test auth middleware yang gagal**
+
+Buat `internal/middleware/auth_test.go`:
+```go
+package middleware_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+)
+
+func TestRequirePlatform_AcceptsPlatformToken(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	userID := uuid.New()
+	token, _ := tm.IssueAccessToken(userID, auth.ScopePlatform, nil)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequirePlatform(tm))
+	var seenActor database.Actor
+	app.Get("/x", func(c *fiber.Ctx) error {
+		seenActor, _ = database.ActorFromContext(c.UserContext())
+		return c.SendStatus(200)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if seenActor.UserID != userID {
+		t.Errorf("actor.UserID = %v, want %v", seenActor.UserID, userID)
+	}
+}
+
+func TestRequirePlatform_RejectsTenantScopeToken(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	tenantID := uuid.New()
+	token, _ := tm.IssueAccessToken(uuid.New(), auth.ScopeTenant, &tenantID)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequirePlatform(tm))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Error("RequirePlatform accepted a tenant-scope token")
+	}
+}
+
+func TestRequirePlatform_RejectsMissingToken(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequirePlatform(tm))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Error("RequirePlatform accepted a request with no token")
+	}
+}
+
+func TestRequireTenant_AcceptsActiveTenant_SetsTenantContext(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	tenantID := uuid.New()
+	userID := uuid.New()
+	token, _ := tm.IssueAccessToken(userID, auth.ScopeTenant, &tenantID)
+
+	fake := &fakeTenantLookup{record: middleware.TenantRecord{
+		TenantID: tenantID, SchemaName: "acme_corp", Status: "active", SchemaVersion: 4,
+	}}
+	resolver := middleware.NewTenantResolver(fake, time.Minute)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequireTenant(tm, resolver))
+	var seenTenant database.TenantInfo
+	app.Get("/x", func(c *fiber.Ctx) error {
+		seenTenant, _ = database.TenantFromContext(c.UserContext())
+		return c.SendStatus(200)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if seenTenant.SchemaName != "acme_corp" {
+		t.Errorf("tenant.SchemaName = %q, want acme_corp", seenTenant.SchemaName)
+	}
+}
+
+func TestRequireTenant_RejectsSuspendedTenant(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	tenantID := uuid.New()
+	token, _ := tm.IssueAccessToken(uuid.New(), auth.ScopeTenant, &tenantID)
+
+	fake := &fakeTenantLookup{record: middleware.TenantRecord{
+		TenantID: tenantID, SchemaName: "acme_corp", Status: "suspended", SchemaVersion: 4,
+	}}
+	resolver := middleware.NewTenantResolver(fake, time.Minute)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequireTenant(tm, resolver))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Error("RequireTenant accepted a suspended tenant")
+	}
+}
+
+func TestRequireTenant_RejectsBehindMigrationVersion(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Minute)
+	tenantID := uuid.New()
+	token, _ := tm.IssueAccessToken(uuid.New(), auth.ScopeTenant, &tenantID)
+
+	fake := &fakeTenantLookup{record: middleware.TenantRecord{
+		TenantID: tenantID, SchemaName: "acme_corp", Status: "active", SchemaVersion: 1,
+	}}
+	resolver := middleware.NewTenantResolver(fake, time.Minute)
+
+	app := fiber.New()
+	app.Use(middleware.RequestID())
+	app.Use(middleware.Logger(nil))
+	app.Use(middleware.RequireTenant(tm, resolver))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Error("RequireTenant accepted a tenant whose schema is behind the binary's compiled-in migrations")
+	}
+}
+```
+
+- [ ] **Langkah 6: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/middleware/... -run RequirePlatform -v` dan `go test ./internal/middleware/... -run RequireTenant -v`
+Hasil: FAIL — `middleware.RequirePlatform` / `RequireTenant` belum ada.
+
+- [ ] **Langkah 7: Implementasikan auth.go**
+
+Buat `internal/middleware/auth.go`:
+```go
+package middleware
+
+import (
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/migration"
+)
+
+func bearerToken(c *fiber.Ctx) (string, bool) {
+	h := c.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(h, prefix), true
+}
+
+// RequirePlatform verifies the request carries a valid access token with
+// scope=platform and sets the actor in the request context. A tenant-scope
+// token is rejected outright, even though both are signed with the same
+// secret — scope is a hard partition, not just a hint.
+func RequirePlatform(tm *auth.TokenManager) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		tokenStr, ok := bearerToken(c)
+		if !ok {
+			return apperror.Unauthorized("token tidak ditemukan")
+		}
+		claims, err := tm.Verify(tokenStr)
+		if err != nil {
+			return apperror.Unauthorized("token tidak valid")
+		}
+		if claims.Scope != auth.ScopePlatform {
+			return apperror.Forbidden("token ini bukan untuk admin platform")
+		}
+		userID, err := uuid.Parse(claims.Subject)
+		if err != nil {
+			return apperror.Unauthorized("token tidak valid")
+		}
+
+		c.SetUserContext(database.WithActor(c.UserContext(), database.Actor{
+			UserID: userID, Scope: auth.ScopePlatform,
+		}))
+		return c.Next()
+	}
+}
+
+// RequireTenant verifies the request carries a valid access token with
+// scope=tenant, resolves the tenant's schema/status/migration version
+// through resolver, rejects non-active tenants and schemas whose
+// migrations haven't caught up with this binary (TENANT_MIGRATION_PENDING),
+// and sets both actor and tenant info in the request context — everything
+// database.WithTenant needs downstream.
+func RequireTenant(tm *auth.TokenManager, resolver *TenantResolver) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		tokenStr, ok := bearerToken(c)
+		if !ok {
+			return apperror.Unauthorized("token tidak ditemukan")
+		}
+		claims, err := tm.Verify(tokenStr)
+		if err != nil {
+			return apperror.Unauthorized("token tidak valid")
+		}
+		if claims.Scope != auth.ScopeTenant {
+			return apperror.Forbidden("token ini bukan untuk staf tenant")
+		}
+		userID, err := uuid.Parse(claims.Subject)
+		if err != nil {
+			return apperror.Unauthorized("token tidak valid")
+		}
+		tenantID, err := uuid.Parse(claims.TenantID)
+		if err != nil {
+			return apperror.Unauthorized("token tidak valid")
+		}
+
+		record, err := resolver.Resolve(c.UserContext(), tenantID)
+		if err != nil {
+			return apperror.Unauthorized("tenant tidak ditemukan")
+		}
+		if record.Status != "active" {
+			return apperror.Forbidden("tenant tidak aktif")
+		}
+		if record.SchemaDirty || record.SchemaVersion < migration.LatestTenantVersion() {
+			return apperror.TenantMigrationPending()
+		}
+
+		ctx := c.UserContext()
+		ctx = database.WithActor(ctx, database.Actor{UserID: userID, Scope: auth.ScopeTenant})
+		ctx = database.WithTenantInfo(ctx, database.TenantInfo{TenantID: tenantID, SchemaName: record.SchemaName})
+		c.SetUserContext(ctx)
+
+		SetLoggerInCtx(c, LoggerFromContext(ctx).With("tenant_id", tenantID.String()))
+		return c.Next()
+	}
+}
+```
+
+- [ ] **Langkah 8: Jalankan semua test middleware, pastikan lolos**
+
+Jalankan: `go test ./internal/middleware/... -v`
+Hasil: PASS — semua test di paket ini lolos, termasuk 8 test baru dari tugas ini.
+
+- [ ] **Langkah 9: Commit**
+
+```bash
+git add internal/middleware
+git commit -m "feat: platform/tenant auth middleware with cached tenant resolution and migration guard"
+```
+
+---
