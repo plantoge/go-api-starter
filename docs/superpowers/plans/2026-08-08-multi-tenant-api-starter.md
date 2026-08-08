@@ -22,6 +22,16 @@
 - Response envelope: `{"success": true, "data": ...}` / `{"success": false, "error": {"code","message","details"}, "request_id": ...}`. Validation errors put `field -> []message` in `details`, using the JSON field name.
 - All HTTP routes live under `/api/v1`.
 - No Docker. No testcontainers — integration tests run against a local PostgreSQL `app_test` database, config from `.env.test`.
+- **Language convention:** Go identifiers (functions, types, variables, packages) stay in English — that's the idiomatic Go convention and keeps the codebase compatible with its all-English dependencies (Fiber, sqlx, etc.). Everything a human reads that isn't an identifier — code comments, CLI `fmt.Println`/`fmt.Printf` output, log messages, and API error/response messages — is written in Bahasa Indonesia. Every code snippet below that has an English comment or English CLI-facing string should be translated to Indonesian when actually typed into a file; only the snippets that happen to already be pure Indonesian prose (most `apperror.*` messages already are) are copy-ready as-is. Example:
+  ```go
+  // English (as written in this plan's snippets — translate before saving):
+  // Login is the one place tenant identity is established without a token.
+  fmt.Println("tenant provisioned:")
+
+  // Indonesian (what the actual file should contain):
+  // Login adalah satu-satunya tempat identitas tenant ditetapkan tanpa token.
+  fmt.Println("tenant berhasil di-provisioning:")
+  ```
 
 ---
 
