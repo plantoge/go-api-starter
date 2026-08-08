@@ -2528,3 +2528,398 @@ git commit -m "feat: tenant schema migrations and cli migrate tenant/status comm
 ```
 
 ---
+
+### Tugas 8: Hashing password + JWT + helper refresh token
+
+**Berkas:**
+- Buat: `internal/auth/password.go`
+- Buat: `internal/auth/jwt.go`
+- Buat: `internal/auth/refreshtoken.go`
+- Test: `internal/auth/password_test.go`
+- Test: `internal/auth/jwt_test.go`
+- Test: `internal/auth/refreshtoken_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `auth.BcryptCost = 12`, `auth.HashPassword(plain string) (string, error)`, `auth.VerifyPassword(hash, plain string) bool`
+  - `auth.ValidatePasswordStrength(plain string) *apperror.Error`
+  - `auth.ScopePlatform = "platform"`, `auth.ScopeTenant = "tenant"`
+  - Struct `auth.Claims { jwt.RegisteredClaims; Scope string; TenantID string }`
+  - `auth.NewTokenManager(secret string, accessTTL time.Duration) *TokenManager`
+  - `(tm *TokenManager) IssueAccessToken(userID uuid.UUID, scope string, tenantID *uuid.UUID) (string, error)`
+  - `(tm *TokenManager) Verify(tokenString string) (*Claims, error)`
+  - `auth.GenerateRefreshToken() (plain string, hash string, err error)`
+  - `auth.HashRefreshToken(plain string) string`
+
+- [ ] **Langkah 1: Tambah dependency**
+
+Jalankan:
+```bash
+go get golang.org/x/crypto/bcrypt
+go get github.com/golang-jwt/jwt/v5
+```
+
+- [ ] **Langkah 2: Tulis test password yang gagal**
+
+Buat `internal/auth/password_test.go`:
+```go
+package auth
+
+import "testing"
+
+func TestHashAndVerifyPassword(t *testing.T) {
+	hash, err := HashPassword("correcthorsebattery")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if !VerifyPassword(hash, "correcthorsebattery") {
+		t.Error("VerifyPassword() = false for the correct password")
+	}
+	if VerifyPassword(hash, "wrong-password") {
+		t.Error("VerifyPassword() = true for a wrong password")
+	}
+}
+
+func TestValidatePasswordStrength_TooShort(t *testing.T) {
+	if err := ValidatePasswordStrength("short1"); err == nil {
+		t.Error("expected error for a password under 8 characters")
+	}
+}
+
+func TestValidatePasswordStrength_CommonPassword(t *testing.T) {
+	if err := ValidatePasswordStrength("password"); err == nil {
+		t.Error("expected error for a common password")
+	}
+	if err := ValidatePasswordStrength("123456789"); err == nil {
+		t.Error("expected error for a common password")
+	}
+}
+
+func TestValidatePasswordStrength_Valid(t *testing.T) {
+	if err := ValidatePasswordStrength("a-reasonably-unique-passphrase"); err != nil {
+		t.Errorf("ValidatePasswordStrength() = %v, want nil", err)
+	}
+}
+```
+
+- [ ] **Langkah 3: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/auth/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 4: Implementasikan password.go**
+
+Buat `internal/auth/password.go`:
+```go
+package auth
+
+import (
+	"golang.org/x/crypto/bcrypt"
+
+	"go-api-starter/internal/apperror"
+)
+
+const BcryptCost = 12
+
+func HashPassword(plain string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(plain), BcryptCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func VerifyPassword(hash, plain string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
+}
+
+// commonPasswords is a short blocklist of passwords long enough to pass
+// the length check but still trivially guessable. Intentionally small —
+// the length requirement does most of the work; this just catches the
+// most obvious misses.
+var commonPasswords = map[string]bool{
+	"password":  true,
+	"12345678":  true,
+	"123456789": true,
+	"qwertyui":  true,
+	"11111111":  true,
+	"password1": true,
+	"letmein11": true,
+}
+
+// ValidatePasswordStrength enforces the starter's password policy: at
+// least 8 characters, not on the common-password blocklist. Deliberately
+// no uppercase/digit/symbol requirement — those rules are well documented
+// to push people toward predictable patterns or writing passwords down,
+// without meaningfully raising guess-resistance over plain length.
+func ValidatePasswordStrength(plain string) *apperror.Error {
+	details := map[string][]string{}
+	if len(plain) < 8 {
+		details["password"] = append(details["password"], "minimal 8 karakter")
+	}
+	if commonPasswords[plain] {
+		details["password"] = append(details["password"], "password terlalu umum, gunakan yang lain")
+	}
+	if len(details) > 0 {
+		return apperror.Validation(details)
+	}
+	return nil
+}
+```
+
+- [ ] **Langkah 5: Jalankan test password, pastikan lolos**
+
+Jalankan: `go test ./internal/auth/... -run Password -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 6: Tulis test JWT yang gagal**
+
+Buat `internal/auth/jwt_test.go`:
+```go
+package auth
+
+import (
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+func TestIssueAndVerifyAccessToken_TenantScope(t *testing.T) {
+	tm := NewTokenManager("test-secret", 15*time.Minute)
+	userID := uuid.New()
+	tenantID := uuid.New()
+
+	token, err := tm.IssueAccessToken(userID, ScopeTenant, &tenantID)
+	if err != nil {
+		t.Fatalf("IssueAccessToken: %v", err)
+	}
+
+	claims, err := tm.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Subject != userID.String() {
+		t.Errorf("Subject = %q, want %q", claims.Subject, userID.String())
+	}
+	if claims.Scope != ScopeTenant {
+		t.Errorf("Scope = %q, want %q", claims.Scope, ScopeTenant)
+	}
+	if claims.TenantID != tenantID.String() {
+		t.Errorf("TenantID = %q, want %q", claims.TenantID, tenantID.String())
+	}
+}
+
+func TestIssueAndVerifyAccessToken_PlatformScope_NoTenantID(t *testing.T) {
+	tm := NewTokenManager("test-secret", 15*time.Minute)
+	userID := uuid.New()
+
+	token, err := tm.IssueAccessToken(userID, ScopePlatform, nil)
+	if err != nil {
+		t.Fatalf("IssueAccessToken: %v", err)
+	}
+
+	claims, err := tm.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Scope != ScopePlatform {
+		t.Errorf("Scope = %q, want %q", claims.Scope, ScopePlatform)
+	}
+	if claims.TenantID != "" {
+		t.Errorf("TenantID = %q, want empty for platform scope", claims.TenantID)
+	}
+}
+
+func TestVerify_RejectsTokenSignedWithDifferentSecret(t *testing.T) {
+	tm1 := NewTokenManager("secret-one", 15*time.Minute)
+	tm2 := NewTokenManager("secret-two", 15*time.Minute)
+
+	token, err := tm1.IssueAccessToken(uuid.New(), ScopePlatform, nil)
+	if err != nil {
+		t.Fatalf("IssueAccessToken: %v", err)
+	}
+	if _, err := tm2.Verify(token); err == nil {
+		t.Error("Verify() accepted a token signed with a different secret")
+	}
+}
+
+func TestVerify_RejectsExpiredToken(t *testing.T) {
+	tm := NewTokenManager("test-secret", -1*time.Minute) // already expired
+	token, err := tm.IssueAccessToken(uuid.New(), ScopePlatform, nil)
+	if err != nil {
+		t.Fatalf("IssueAccessToken: %v", err)
+	}
+	if _, err := tm.Verify(token); err == nil {
+		t.Error("Verify() accepted an expired token")
+	}
+}
+```
+
+- [ ] **Langkah 7: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/auth/... -run Token -v`
+Hasil: FAIL — `NewTokenManager` belum ada.
+
+- [ ] **Langkah 8: Implementasikan jwt.go**
+
+Buat `internal/auth/jwt.go`:
+```go
+package auth
+
+import (
+	"errors"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+)
+
+const (
+	ScopePlatform = "platform"
+	ScopeTenant   = "tenant"
+)
+
+type Claims struct {
+	jwt.RegisteredClaims
+	Scope    string `json:"scope"`
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+type TokenManager struct {
+	secret    []byte
+	accessTTL time.Duration
+}
+
+func NewTokenManager(secret string, accessTTL time.Duration) *TokenManager {
+	return &TokenManager{secret: []byte(secret), accessTTL: accessTTL}
+}
+
+// IssueAccessToken signs a short-lived access token. tenantID must be
+// non-nil for ScopeTenant and nil for ScopePlatform — each side's auth
+// service (Tasks 12 and 16) enforces which is which; this just carries
+// whatever it's given.
+func (tm *TokenManager) IssueAccessToken(userID uuid.UUID, scope string, tenantID *uuid.UUID) (string, error) {
+	claims := Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   userID.String(),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(tm.accessTTL)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		Scope: scope,
+	}
+	if tenantID != nil {
+		claims.TenantID = tenantID.String()
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(tm.secret)
+}
+
+// Verify parses and validates tokenString: signature and expiry only. It
+// never inspects permissions — permissions are deliberately not carried in
+// the token (see Task 15) — so a verified token proves who the caller is
+// and which scope they hold, nothing more.
+func (tm *TokenManager) Verify(tokenString string) (*Claims, error) {
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return tm.secret, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !token.Valid {
+		return nil, errors.New("invalid token")
+	}
+	return claims, nil
+}
+```
+
+- [ ] **Langkah 9: Jalankan test JWT, pastikan lolos**
+
+Jalankan: `go test ./internal/auth/... -run Token -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 10: Tulis test refresh token yang gagal**
+
+Buat `internal/auth/refreshtoken_test.go`:
+```go
+package auth
+
+import "testing"
+
+func TestGenerateRefreshToken_UniqueAndHashMatches(t *testing.T) {
+	plain1, hash1, err := GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken: %v", err)
+	}
+	plain2, hash2, err := GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken: %v", err)
+	}
+
+	if plain1 == plain2 {
+		t.Error("two calls returned the same plain token")
+	}
+	if hash1 == hash2 {
+		t.Error("two calls returned the same hash")
+	}
+	if HashRefreshToken(plain1) != hash1 {
+		t.Error("HashRefreshToken(plain1) does not match the hash returned alongside it")
+	}
+}
+```
+
+- [ ] **Langkah 11: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/auth/... -run RefreshToken -v`
+Hasil: FAIL — `GenerateRefreshToken` belum ada.
+
+- [ ] **Langkah 12: Implementasikan refreshtoken.go**
+
+Buat `internal/auth/refreshtoken.go`:
+```go
+package auth
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+)
+
+// GenerateRefreshToken returns a fresh random refresh token. plain is sent
+// to the client; hash is stored in the database — never the plain value
+// itself, so a stolen database dump can't be replayed as a valid refresh
+// token.
+func GenerateRefreshToken() (plain string, hash string, err error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	plain = base64.RawURLEncoding.EncodeToString(buf)
+	return plain, HashRefreshToken(plain), nil
+}
+
+func HashRefreshToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
+}
+```
+
+- [ ] **Langkah 13: Jalankan semua test auth, pastikan lolos**
+
+Jalankan: `go test ./internal/auth/... -v`
+Hasil: PASS — semua 9 test di ketiga berkas lolos.
+
+- [ ] **Langkah 14: Commit**
+
+```bash
+git add go.mod go.sum internal/auth
+git commit -m "feat: password hashing, JWT issuing/verification, refresh tokens"
+```
+
+---
