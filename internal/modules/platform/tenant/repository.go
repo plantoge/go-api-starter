@@ -77,6 +77,24 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.Ten
 	}, nil
 }
 
+// FindRecordByCode is FindByCode plus a migration-version check, shaped as
+// middleware.TenantRecord — the tenant/auth module's login flow (Task 16)
+// uses this to resolve a tenant_code to enough info to attempt a login.
+func (r *Repository) FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error) {
+	t, err := r.FindByCode(ctx, code)
+	if err != nil {
+		return middleware.TenantRecord{}, err
+	}
+	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
+	return middleware.TenantRecord{
+		TenantID: t.ID, SchemaName: t.SchemaName, Status: t.Status,
+		SchemaVersion: version, SchemaDirty: dirty,
+	}, nil
+}
+
 func (r *Repository) List(ctx context.Context, limit, offset int, orderBy string) ([]Tenant, int, error) {
 	var tenants []Tenant
 	query := `SELECT * FROM tenants WHERE deleted_at IS NULL ORDER BY ` + orderBy + ` LIMIT $1 OFFSET $2`

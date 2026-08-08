@@ -78,6 +78,27 @@ func RandomSchemaName() string {
 	return "test_" + string(b)
 }
 
+// SeedInSchema runs a fixture-setup query with search_path pinned to
+// schema, for tests that need to insert rows directly rather than going
+// through database.WithTenant themselves.
+func SeedInSchema(t *testing.T, pool *sqlx.DB, schema, query string, args ...any) {
+	t.Helper()
+	tx, err := pool.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL search_path TO "`+schema+`"`); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
+		t.Fatalf("seed query: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
