@@ -86,6 +86,11 @@ func (db *DB) WithTenant(ctx context.Context, fn func(tx *sqlx.Tx) error) error 
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
 
+	// Deliberately pins search_path to the tenant schema alone, excluding
+	// "public" — unqualified extension objects conventionally installed
+	// there (pgcrypto, uuid-ossp, citext) will NOT resolve inside
+	// WithTenant. This is an intentional isolation choice, not an
+	// oversight; revisit if/when tenant migrations need those extensions.
 	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO "+quoteIdentifier(info.SchemaName)); err != nil {
 		return apperror.Internal(fmt.Errorf("set search_path: %w", err))
 	}

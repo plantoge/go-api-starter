@@ -8,7 +8,6 @@ import (
 	"math/rand"
 	"os"
 	"testing"
-	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
@@ -42,12 +41,15 @@ func OpenTestDB(t *testing.T) *sqlx.DB {
 
 // RandomSchemaName returns a name like "test_a1b2c3d4" that satisfies the
 // tenant schema-name regex, for tests that need their own throwaway schema.
+// Uses the package-level math/rand source directly (auto-seeded since
+// Go 1.20) instead of reseeding a new source per call, which on coarse
+// clock granularity could otherwise produce duplicate names on
+// back-to-back calls.
 func RandomSchemaName() string {
-	src := rand.New(rand.NewSource(time.Now().UnixNano()))
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 8)
 	for i := range b {
-		b[i] = letters[src.Intn(len(letters))]
+		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return "test_" + string(b)
 }
