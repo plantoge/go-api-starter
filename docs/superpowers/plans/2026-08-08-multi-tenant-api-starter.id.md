@@ -895,3 +895,334 @@ git commit -m "feat: typed app errors and uniform JSON response envelope"
 ```
 
 ---
+
+### Tugas 4: Helper Validator + Pagination
+
+**Berkas:**
+- Buat: `internal/validator/validator.go`
+- Buat: `internal/pagination/pagination.go`
+- Test: `internal/validator/validator_test.go`
+- Test: `internal/pagination/pagination_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `validator.Validate(s any) *apperror.Error` — menjalankan go-playground/validator, mengembalikan `nil` kalau valid, kalau tidak `apperror.Validation(details)` dengan key nama tag JSON tiap field.
+  - Struct `pagination.Params { Page, Limit int; Sort, Order string }`
+  - `pagination.Parse(c *fiber.Ctx, sortable map[string]string, defaultSort string) (Params, *apperror.Error)` — membaca query param `page`, `limit`, `sort`, `order`; `limit` di-clamp ke `[1,100]`; menolak `sort` di luar `sortable` dan `order` selain `asc`/`desc` dengan `apperror.Validation`.
+  - `(p Params) Offset() int`
+  - `(p Params) OrderByClause(sortable map[string]string) string` — misalnya `"created_at DESC"`, dibangun hanya dari nama kolom yang di-whitelist, tidak pernah dari nilai query mentah.
+  - `pagination.BuildMeta(page, limit, total int) response.Meta`
+
+- [ ] **Langkah 1: Tambah dependency validator**
+
+Jalankan: `go get github.com/go-playground/validator/v10@latest`
+
+- [ ] **Langkah 2: Tulis test validator yang gagal**
+
+Buat `internal/validator/validator_test.go`:
+```go
+package validator
+
+import "testing"
+
+type signupInput struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8"`
+}
+
+func TestValidate_AllValid_ReturnsNil(t *testing.T) {
+	in := signupInput{Email: "a@b.com", Password: "longenough"}
+	if err := Validate(in); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestValidate_Invalid_ReturnsDetailsByJSONName(t *testing.T) {
+	in := signupInput{Email: "not-an-email", Password: "short"}
+	err := Validate(in)
+	if err == nil {
+		t.Fatal("Validate() = nil, want error")
+	}
+	if _, ok := err.Details["email"]; !ok {
+		t.Errorf("Details missing key 'email', got %v", err.Details)
+	}
+	if _, ok := err.Details["password"]; !ok {
+		t.Errorf("Details missing key 'password', got %v", err.Details)
+	}
+}
+```
+
+- [ ] **Langkah 3: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/validator/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 4: Implementasikan validator.go**
+
+Buat `internal/validator/validator.go`:
+```go
+package validator
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+
+	pv "github.com/go-playground/validator/v10"
+	"go-api-starter/internal/apperror"
+)
+
+var instance = newInstance()
+
+func newInstance() *pv.Validate {
+	v := pv.New()
+	// Laporkan nama field versi JSON (mis. "email"), bukan nama field
+	// struct Go (mis. "Email"), supaya pemetaan error di sisi client tepat.
+	v.RegisterTagNameFunc(func(fld reflect.StructField) string {
+		name := strings.SplitN(fld.Tag.Get("json"), ",", 2)[0]
+		if name == "-" || name == "" {
+			return fld.Name
+		}
+		return name
+	})
+	return v
+}
+
+// Validate menjalankan validasi struct tag pada s. Mengembalikan nil kalau
+// s valid, kalau tidak *apperror.Error dengan Details ber-key nama field
+// versi JSON, supaya frontend bisa menaruh tiap pesan di bawah input yang
+// tepat.
+func Validate(s any) *apperror.Error {
+	err := instance.Struct(s)
+	if err == nil {
+		return nil
+	}
+
+	fieldErrs, ok := err.(pv.ValidationErrors)
+	if !ok {
+		return apperror.Validation(map[string][]string{"_": {err.Error()}})
+	}
+
+	details := make(map[string][]string)
+	for _, fe := range fieldErrs {
+		details[fe.Field()] = append(details[fe.Field()], message(fe))
+	}
+	return apperror.Validation(details)
+}
+
+func message(fe pv.FieldError) string {
+	switch fe.Tag() {
+	case "required":
+		return "wajib diisi"
+	case "email":
+		return "format email tidak valid"
+	case "min":
+		return fmt.Sprintf("minimal %s karakter", fe.Param())
+	case "max":
+		return fmt.Sprintf("maksimal %s karakter", fe.Param())
+	default:
+		return fmt.Sprintf("tidak valid (%s)", fe.Tag())
+	}
+}
+```
+
+- [ ] **Langkah 5: Jalankan test validator, pastikan lolos**
+
+Jalankan: `go test ./internal/validator/... -v`
+Hasil: PASS.
+
+- [ ] **Langkah 6: Tulis test pagination yang gagal**
+
+Buat `internal/pagination/pagination_test.go`:
+```go
+package pagination
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+)
+
+var userSortable = map[string]string{
+	"created_at": "created_at",
+	"name":       "name",
+}
+
+func parseWith(t *testing.T, target string) (Params, *fiber.Ctx) {
+	t.Helper()
+	app := fiber.New()
+	var got Params
+	var gotErr error
+	app.Get("/x", func(c *fiber.Ctx) error {
+		p, appErr := Parse(c, userSortable, "created_at")
+		got = p
+		if appErr != nil {
+			gotErr = appErr
+		}
+		return nil
+	})
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	_, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	_ = gotErr
+	return got, nil
+}
+
+func TestParse_Defaults(t *testing.T) {
+	p, _ := parseWith(t, "/x")
+	if p.Page != 1 {
+		t.Errorf("Page = %d, want 1", p.Page)
+	}
+	if p.Limit != 20 {
+		t.Errorf("Limit = %d, want 20", p.Limit)
+	}
+	if p.Sort != "created_at" {
+		t.Errorf("Sort = %q, want created_at", p.Sort)
+	}
+	if p.Order != "desc" {
+		t.Errorf("Order = %q, want desc", p.Order)
+	}
+}
+
+func TestParse_LimitClampedAt100(t *testing.T) {
+	p, _ := parseWith(t, "/x?limit=500")
+	if p.Limit != 100 {
+		t.Errorf("Limit = %d, want clamped to 100", p.Limit)
+	}
+}
+
+func TestParse_RejectsSortNotInWhitelist(t *testing.T) {
+	app := fiber.New()
+	var appErr *fiber.Error
+	_ = appErr
+	var gotIsNil bool
+	app.Get("/x", func(c *fiber.Ctx) error {
+		_, err := Parse(c, userSortable, "created_at")
+		gotIsNil = err == nil
+		return nil
+	})
+	req := httptest.NewRequest(http.MethodGet, "/x?sort=password_hash", nil)
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if gotIsNil {
+		t.Error("Parse() accepted a sort column outside the whitelist")
+	}
+}
+
+func TestOffset(t *testing.T) {
+	p := Params{Page: 3, Limit: 20}
+	if got := p.Offset(); got != 40 {
+		t.Errorf("Offset() = %d, want 40", got)
+	}
+}
+
+func TestOrderByClause_UsesWhitelistedColumnOnly(t *testing.T) {
+	p := Params{Sort: "name", Order: "asc"}
+	if got := p.OrderByClause(userSortable); got != "name ASC" {
+		t.Errorf("OrderByClause() = %q, want %q", got, "name ASC")
+	}
+}
+```
+
+- [ ] **Langkah 7: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/pagination/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 8: Implementasikan pagination.go**
+
+Buat `internal/pagination/pagination.go`:
+```go
+package pagination
+
+import (
+	"strconv"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/response"
+)
+
+type Params struct {
+	Page  int
+	Limit int
+	Sort  string
+	Order string
+}
+
+// Parse membaca query param page/limit/sort/order. sort harus berupa key
+// di sortable (whitelist kolom milik pemanggil yang aman diinterpolasi ke
+// ORDER BY) — selain itu ditolak. Ini satu-satunya tempat nilai query
+// mentah diizinkan dekat nama kolom sortir; setiap repository wajib lewat
+// sini, bukan membaca c.Query("sort") sendiri.
+func Parse(c *fiber.Ctx, sortable map[string]string, defaultSort string) (Params, *apperror.Error) {
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+
+	limit, _ := strconv.Atoi(c.Query("limit", "20"))
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	sort := c.Query("sort", defaultSort)
+	if _, ok := sortable[sort]; !ok {
+		return Params{}, apperror.Validation(map[string][]string{
+			"sort": {"kolom sortir tidak dikenal"},
+		})
+	}
+
+	order := strings.ToLower(c.Query("order", "desc"))
+	if order != "asc" && order != "desc" {
+		return Params{}, apperror.Validation(map[string][]string{
+			"order": {"harus 'asc' atau 'desc'"},
+		})
+	}
+
+	return Params{Page: page, Limit: limit, Sort: sort, Order: order}, nil
+}
+
+func (p Params) Offset() int {
+	return (p.Page - 1) * p.Limit
+}
+
+// OrderByClause mengembalikan "<kolom> ASC|DESC" HANYA memakai nama kolom
+// SQL yang di-whitelist dari sortable[p.Sort] — tidak pernah nilai mentah
+// p.Sort itu sendiri — jadi selalu aman ditempel langsung ke query string.
+func (p Params) OrderByClause(sortable map[string]string) string {
+	col := sortable[p.Sort]
+	return col + " " + strings.ToUpper(p.Order)
+}
+
+func BuildMeta(page, limit, total int) response.Meta {
+	totalPages := total / limit
+	if total%limit != 0 {
+		totalPages++
+	}
+	return response.Meta{Page: page, Limit: limit, Total: total, TotalPages: totalPages}
+}
+```
+
+- [ ] **Langkah 9: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/pagination/... -v`
+Hasil: PASS — kelima test lolos.
+
+- [ ] **Langkah 10: Commit**
+
+```bash
+git add go.mod go.sum internal/validator internal/pagination
+git commit -m "feat: request validation and whitelist-safe pagination"
+```
+
+---
