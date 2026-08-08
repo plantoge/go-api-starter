@@ -34,9 +34,15 @@ func SuccessList(c *fiber.Ctx, status int, data any, meta Meta) error {
 // use their declared status/code/details verbatim. Anything else (a bug, a
 // driver error that leaked past a service) becomes a 500 whose body carries
 // only request_id — the real error is logged, never sent to the client.
+// Internal errors have their causes logged server-side regardless of whether
+// they arrive as bare errors or as pre-wrapped *apperror.Error.
 func Error(c *fiber.Ctx, requestID string, err error) error {
 	var appErr *apperror.Error
 	if errors.As(err, &appErr) {
+		// Log the cause for internal errors so they reach server-side logs.
+		if appErr.Code == apperror.CodeInternal {
+			slog.Error("internal error", "request_id", requestID, "error", appErr.Unwrap())
+		}
 		body := fiber.Map{
 			"code":    appErr.Code,
 			"message": appErr.Message,

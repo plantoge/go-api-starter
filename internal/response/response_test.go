@@ -1,8 +1,10 @@
 package response
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -94,5 +96,63 @@ func TestError_UnknownError_Becomes500WithoutLeakingDetail(t *testing.T) {
 	}
 	if body.Error.Message == "leaked secret detail" {
 		t.Error("internal error message leaked to client response")
+	}
+}
+
+func TestError_Internal_LogsCauseServerSide(t *testing.T) {
+	// Capture slog output
+	buf := &bytes.Buffer{}
+	handler := slog.NewJSONHandler(buf, nil)
+	logger := slog.New(handler)
+	oldDefault := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(oldDefault)
+
+	app := fiber.New()
+	dbErr := errors.New("connection refused")
+	app.Get("/x", func(c *fiber.Ctx) error {
+		return Error(c, "req-789", apperror.Internal(dbErr))
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/x", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+
+	// Verify response status and that cause is not exposed
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	var body struct {
+		Success   bool   `json:"success"`
+		RequestID string `json:"request_id"`
+		Error     struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Success {
+		t.Error("success = true, want false")
+	}
+	if body.RequestID != "req-789" {
+		t.Errorf("request_id = %q, want req-789", body.RequestID)
+	}
+	if body.Error.Message == "connection refused" {
+		t.Error("cause leaked to client response")
+	}
+
+	// Verify the cause was logged server-side with the request_id
+	logOutput := buf.String()
+	if logOutput == "" {
+		t.Error("expected log output, got empty")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("connection refused")) {
+		t.Error("cause not found in log output")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("req-789")) {
+		t.Error("request_id not found in log output")
 	}
 }
