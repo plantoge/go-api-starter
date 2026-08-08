@@ -88,7 +88,7 @@ internal/
       auth/
     tenant/
       auth/                # login, refresh, logout
-      user/                # staf toko  (contoh pola tenant-scoped)
+      user/                # staf tenant  (contoh pola tenant-scoped)
       role/                # RBAC
   shared/
     response/              # format response JSON seragam
@@ -166,7 +166,7 @@ Konsekuensi: repository tenant menerima `*sqlx.Tx`, bukan `*sqlx.DB`. Efek
 sampingnya menguntungkan — operasi multi-tabel otomatis atomik.
 
 Repository menulis query tanpa prefiks schema (`FROM users`, bukan
-`FROM toko_aba.users`), sehingga modul bisa disalin apa adanya.
+`FROM acme_corp.users`), sehingga modul bisa disalin apa adanya.
 
 ### Pertahanan berlapis
 
@@ -213,7 +213,7 @@ tenant beserta seluruh isinya tetap ada dan tetap memakan ruang disk.
 Penghapusan permanen dilakukan lewat perintah terpisah yang eksplisit:
 
 ```
-cli tenant purge --code=toko_aba --confirm
+cli tenant purge --code=acme_corp --confirm
 ```
 
 Perintah ini menjalankan `DROP SCHEMA` dan **hanya berjalan bila tenant sudah
@@ -238,15 +238,15 @@ Perintah CLI:
 ```
 cli migrate platform up
 cli migrate tenant up --all
-cli migrate tenant up --tenant=toko_aba
+cli migrate tenant up --tenant=acme_corp
 cli migrate status                       # versi tiap tenant, tandai yang tertinggal
 
-cli tenant create --code=toko_aba --name="Toko ABA" --owner-email=...
+cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=...
 cli tenant list
-cli tenant suspend --code=toko_aba
-cli tenant activate --code=toko_aba
-cli tenant delete --code=toko_aba        # soft delete
-cli tenant purge --code=toko_aba --confirm
+cli tenant suspend --code=acme_corp
+cli tenant activate --code=acme_corp
+cli tenant delete --code=acme_corp        # soft delete
+cli tenant purge --code=acme_corp --confirm
 
 cli admin create --email=... --name=...   # admin platform pertama (bootstrap)
 cli permission sync --all                # sinkron konstanta permission ke tenant
@@ -382,9 +382,9 @@ satu tenant-scoped.
 ```sql
 tenants
   id             UUID PK
-  code           TEXT UNIQUE      -- "toko_aba", dipakai saat login
-  name           TEXT             -- "Toko ABA"
-  schema_name    TEXT UNIQUE      -- "toko_aba"
+  code           TEXT UNIQUE      -- "acme_corp", dipakai saat login
+  name           TEXT             -- "Acme Corp"
+  schema_name    TEXT UNIQUE      -- "acme_corp"
   status         TEXT             -- provisioning | active | suspended
   suspended_at   TIMESTAMPTZ NULL
   + kolom audit standar
@@ -441,7 +441,7 @@ Mekanismenya adalah perintah tersendiri:
 
 ```
 cli permission sync --all
-cli permission sync --tenant=toko_aba
+cli permission sync --tenant=acme_corp
 ```
 
 Perintah ini membaca seluruh konstanta permission di kode, lalu `INSERT` yang belum
@@ -702,7 +702,7 @@ LOGIN_MAX_ATTEMPTS=5
 LOGIN_ATTEMPT_WINDOW=15m
 SHUTDOWN_TIMEOUT=15s
 
-CORS_ALLOWED_ORIGINS=https://tokoku.com
+CORS_ALLOWED_ORIGINS=https://acme.com
 ```
 
 Hampir seluruh penyetelan sistem berada di sini, sehingga bisa diubah di server
@@ -726,7 +726,7 @@ menyambungkan frontend.
 Daftar asal yang diizinkan dibaca dari `CORS_ALLOWED_ORIGINS` (dipisah koma):
 
 - Development: `http://localhost:5173`
-- Produksi: domain aplikasi, mis. `https://tokoku.com`
+- Produksi: domain aplikasi, mis. `https://acme.com`
 
 Wildcard `*` **tidak** dipakai, karena API ini memakai kredensial (token). Header
 yang diizinkan dibatasi pada yang benar-benar dipakai: `Content-Type`,
@@ -769,7 +769,7 @@ Aplikasi hanya mendengarkan di `127.0.0.1:8080`, tidak pernah langsung terbuka k
 internet. Caddy berdiri di depan untuk TLS dan pembagian rute:
 
 ```
-tokoku.com {
+acme.com {
     handle /api/* {
         reverse_proxy localhost:8080
     }
@@ -812,8 +812,9 @@ cp api.backup api && sudo systemctl restart app-api
 Migrasi sengaja dijalankan sebagai langkah terpisah, **bukan otomatis saat aplikasi
 start** — agar tidak ada dua instance yang berebut menjalankan migrasi yang sama.
 
-Restart menyebabkan downtime 1–2 detik. Untuk POS, deploy dilakukan di luar jam
-operasional. Zero-downtime deploy tidak dibangun sekarang.
+Restart menyebabkan downtime 1–2 detik. Untuk aplikasi dengan jam operasional
+tertentu (seperti POS), deploy dilakukan di luar jam operasional itu. Zero-downtime
+deploy tidak dibangun sekarang.
 
 Build ulang hanya diperlukan bila kode `.go` berubah. Mengubah `api.env` atau
 menambah tenant cukup restart / jalankan CLI.
@@ -825,7 +826,7 @@ port lokal.
 ### Backup
 
 Satu database menampung data transaksi seluruh client. Satu disk rusak berarti semua
-toko kehilangan data sekaligus, jadi backup bukan hal opsional di sini.
+client kehilangan data sekaligus, jadi backup bukan hal opsional di sini.
 
 Ketentuan minimum:
 
@@ -850,7 +851,8 @@ penyebabnya tidak terlihat.
 
 - `/health` (liveness) dan `/health/ready` (cek koneksi DB).
 - Graceful shutdown — berhenti menerima request baru, lalu menunggu request yang
-  sedang berjalan sampai selesai agar transaksi kasir tidak terputus. Dibatasi
+  sedang berjalan sampai selesai agar tidak ada transaksi yang terputus di tengah
+  jalan. Dibatasi
   `SHUTDOWN_TIMEOUT` (default 15 detik); lewat dari itu proses ditutup paksa. Tanpa
   batas ini, satu query yang menggantung membuat aplikasi tidak pernah mati dan
   akhirnya dibunuh paksa systemd — persis hal yang ingin dihindari.
