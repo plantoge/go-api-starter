@@ -7889,6 +7889,18 @@ func TestTenantIsolation_AcrossTwoTenantsWithSimilarData(t *testing.T) {
 	_, listB := doJSON(t, app, http.MethodGet, "/api/v1/users?limit=100", nil, tokenB)
 	assertNamesPresentAbsent(t, listB, []string{"Staff B"}, []string{"Staff A"})
 
+	// Amandemen (ditambahkan saat eksekusi Tugas 20): kontrol positif
+	// sebelum pengecekan negatif di bawah. Tanpa ini, 404 pada pengambilan
+	// lintas-tenant itu ambigu — bisa berarti "terisolasi" (jaminan yang
+	// dimaksud) atau "route/handler-nya rusak" (hasil lolos palsu yang
+	// terlihat identik). Tenant A mengambil user-nya sendiri membuktikan
+	// route dan handler benar-benar berfungsi, sehingga pengecekan negatif
+	// berikutnya menjadi sinyal nyata, bukan kebetulan.
+	respOwnFetch, bodyOwnFetch := doJSON(t, app, http.MethodGet, "/api/v1/users/"+staffAID, nil, tokenA)
+	if respOwnFetch.StatusCode != 200 {
+		t.Fatalf("tenant A failed to fetch its own user by ID: status=%d body=%v", respOwnFetch.StatusCode, bodyOwnFetch)
+	}
+
 	// The strongest check: tenant B, holding tenant A's own user ID,
 	// cannot fetch it — WithTenant scopes every query to the caller's
 	// schema regardless of which ID is asked for.
