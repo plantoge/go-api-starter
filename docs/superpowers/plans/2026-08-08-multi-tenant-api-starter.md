@@ -664,7 +664,7 @@ func RateLimited(msg string) *Error {
 func TenantMigrationPending() *Error {
 	return &Error{
 		Code:    CodeTenantMigrationPending,
-		Message: "this tenant has pending migrations that must be applied before it can be used",
+		Message: "tenant ini punya migrasi yang belum diterapkan dan harus diselesaikan dulu",
 		Status:  409,
 	}
 }
