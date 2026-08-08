@@ -4322,6 +4322,25 @@ func NewService(platformDB *sqlx.DB, tokens *appauth.TokenManager, accessTTL, re
 	return &Service{db: platformDB, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
 }
 
+// dummyPasswordHash adalah hash bcrypt yang valid dari password acak yang
+// tidak pernah dipakai. Login selalu memanggil VerifyPassword tepat satu
+// kali — terhadap hash user asli jika ditemukan, atau terhadap hash tetap
+// ini jika tidak — sehingga durasi respons tidak pernah membocorkan apakah
+// sebuah email ada/aktif dibanding ada-tapi-password-salah. (Amandemen,
+// ditambahkan saat eksekusi Tugas 12: versi awal di bawah ini melewati
+// VerifyPassword sepenuhnya lewat short-circuit && setiap kali user tidak
+// ditemukan atau tidak aktif, menciptakan celah timing yang bisa dipakai
+// untuk enumerasi email.)
+var dummyPasswordHash = mustHashDummyPassword()
+
+func mustHashDummyPassword() string {
+	hash, err := appauth.HashPassword("not-a-real-password-used-only-for-constant-time-comparison")
+	if err != nil {
+		panic(err)
+	}
+	return hash
+}
+
 func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, error) {
 	if err := s.rateLimiter.Check(ctx, appauth.ScopePlatform, nil, req.Email); err != nil {
 		return LoginResponse{}, err
@@ -4331,7 +4350,18 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 	err := s.db.GetContext(ctx, &u,
 		`SELECT id, email, password_hash, is_active FROM users WHERE email = $1 AND deleted_at IS NULL`,
 		req.Email)
-	valid := err == nil && u.IsActive && appauth.VerifyPassword(u.PasswordHash, req.Password)
+	found := err == nil && u.IsActive
+
+	hashToCheck := dummyPasswordHash
+	if found {
+		hashToCheck = u.PasswordHash
+	}
+	// Selalu panggil VerifyPassword — terhadap hash asli jika ditemukan,
+	// terhadap hash dummy tetap jika tidak — sehingga biaya baris ini
+	// (didominasi oleh bcrypt) sama di setiap jalur terlepas dari apakah
+	// user tersebut ada.
+	passwordOK := appauth.VerifyPassword(hashToCheck, req.Password)
+	valid := found && passwordOK
 
 	s.rateLimiter.Record(ctx, appauth.ScopePlatform, nil, req.Email, valid)
 	if !valid {
@@ -6360,6 +6390,23 @@ func NewService(db *database.DB, tenants TenantLookup, tokens *appauth.TokenMana
 	return &Service{db: db, tenants: tenants, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
 }
 
+// dummyPasswordHash adalah hash bcrypt yang valid dari password acak yang
+// tidak pernah dipakai. Login selalu memanggil VerifyPassword tepat satu
+// kali — terhadap hash user asli jika ditemukan dan aktif, atau terhadap
+// hash tetap ini jika tidak — sehingga durasi respons tidak pernah
+// membocorkan apakah sebuah email ada/aktif. Pola dan alasan yang sama
+// dengan service auth admin platform (Tugas 12), diduplikasi di sini
+// karena package-nya berbeda.
+var dummyPasswordHash = mustHashDummyPassword()
+
+func mustHashDummyPassword() string {
+	hash, err := appauth.HashPassword("not-a-real-password-used-only-for-constant-time-comparison")
+	if err != nil {
+		panic(err)
+	}
+	return hash
+}
+
 func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, error) {
 	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
 	if err != nil || tenantRec.Status != "active" {
@@ -6390,7 +6437,20 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 		return LoginResponse{}, apperror.Internal(err)
 	}
 
-	valid := found && u.IsActive && appauth.VerifyPassword(u.PasswordHash, req.Password)
+	// Amandemen (ditambahkan bersamaan dengan perbaikan Tugas 12 yang
+	// identik, dengan alasan yang sama): selalu panggil VerifyPassword —
+	// terhadap hash asli jika ditemukan dan aktif, terhadap
+	// dummyPasswordHash tetap jika tidak — sehingga biaya baris ini sama
+	// di setiap jalur. Tanpa ini, short-circuit && melewati pemanggilan
+	// bcrypt setiap kali user tidak ditemukan/tidak aktif, membiarkan
+	// durasi respons membocorkan email mana yang ada.
+	activeFound := found && u.IsActive
+	hashToCheck := dummyPasswordHash
+	if activeFound {
+		hashToCheck = u.PasswordHash
+	}
+	passwordOK := appauth.VerifyPassword(hashToCheck, req.Password)
+	valid := activeFound && passwordOK
 	s.rateLimiter.Record(ctx, appauth.ScopeTenant, &tenantRec.TenantID, req.Email, valid)
 	if !valid {
 		return LoginResponse{}, apperror.Unauthorized("tenant_code, email, atau password salah")
