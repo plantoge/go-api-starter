@@ -3395,3 +3395,220 @@ git commit -m "feat: request ID, structured request logging, panic recovery, COR
 ```
 
 ---
+
+### Tugas 10: Rate limit login
+
+`login_attempts` hidup di schema `platform`, tidak peduli apakah percobaan login itu untuk platform atau tenant — service ini selalu bicara ke pool yang di-pin ke platform, tidak pernah lewat `WithTenant`.
+
+**Berkas:**
+- Buat: `internal/ratelimit/loginattempt.go`
+- Ubah: `internal/testsupport/testsupport.go` — tambah `OpenTestPlatformDB`
+- Test: `internal/ratelimit/loginattempt_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `ratelimit.NewLoginAttemptService(platformDB *sqlx.DB, maxAttempts int, window time.Duration) *LoginAttemptService`
+  - `(s *LoginAttemptService) Check(ctx context.Context, scope string, tenantID *uuid.UUID, email string) error` — mengembalikan `apperror.RateLimited` kalau diblokir, `nil` kalau tidak.
+  - `(s *LoginAttemptService) Record(ctx context.Context, scope string, tenantID *uuid.UUID, email string, success bool) error`
+  - `testsupport.OpenTestPlatformDB(t *testing.T) *sqlx.DB` — seperti `OpenTestDB` tapi di-pin ke `search_path=platform`, mencerminkan `database.NewPlatformPool`.
+
+- [ ] **Langkah 1: Tambah helper test yang di-pin ke platform**
+
+Ubah `internal/testsupport/testsupport.go` — tambahkan fungsi ini di sebelah `OpenTestDB`:
+```go
+// OpenTestPlatformDB is OpenTestDB with search_path pinned to "platform",
+// mirroring database.NewPlatformPool in production — for tests of code
+// that expects to write unqualified names ("FROM login_attempts") because
+// it assumes a platform-pinned connection.
+func OpenTestPlatformDB(t *testing.T) *sqlx.DB {
+	t.Helper()
+	_ = godotenv.Load(findEnvTestFile())
+
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&search_path=platform",
+		getenv("DB_USER", "app"),
+		getenv("DB_PASSWORD", "changeme"),
+		getenv("DB_HOST", "localhost"),
+		getenv("DB_PORT", "5432"),
+		getenv("DB_NAME", "app_test"),
+		getenv("DB_SSLMODE", "disable"),
+	)
+	db, err := sqlx.Connect("pgx", dsn)
+	if err != nil {
+		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+```
+
+- [ ] **Langkah 2: Tulis test yang gagal**
+
+Buat `internal/ratelimit/loginattempt_test.go`:
+```go
+package ratelimit_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"go-api-starter/internal/migration"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/testsupport"
+)
+
+func setupLoginAttempts(t *testing.T) *ratelimit.LoginAttemptService {
+	t.Helper()
+	rawDB := testsupport.OpenTestDB(t)
+	if err := migration.MigratePlatformUp(rawDB.DB); err != nil {
+		t.Fatalf("MigratePlatformUp: %v", err)
+	}
+	t.Cleanup(func() { rawDB.Exec("TRUNCATE platform.login_attempts") })
+
+	platformDB := testsupport.OpenTestPlatformDB(t)
+	return ratelimit.NewLoginAttemptService(platformDB, 5, 15*time.Minute)
+}
+
+func TestCheck_AllowsUnderLimit(t *testing.T) {
+	svc := setupLoginAttempts(t)
+	ctx := context.Background()
+
+	for i := 0; i < 4; i++ {
+		if err := svc.Record(ctx, "tenant", nil, "user@example.com", false); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	if err := svc.Check(ctx, "tenant", nil, "user@example.com"); err != nil {
+		t.Errorf("Check() = %v, want nil at 4 failed attempts (limit is 5)", err)
+	}
+}
+
+func TestCheck_BlocksAtLimit(t *testing.T) {
+	svc := setupLoginAttempts(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if err := svc.Record(ctx, "tenant", nil, "user@example.com", false); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	if err := svc.Check(ctx, "tenant", nil, "user@example.com"); err == nil {
+		t.Fatal("Check() = nil, want RATE_LIMITED at 5 failed attempts")
+	}
+}
+
+func TestCheck_DifferentEmailsAreIndependent(t *testing.T) {
+	svc := setupLoginAttempts(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		svc.Record(ctx, "tenant", nil, "a@example.com", false)
+	}
+
+	if err := svc.Check(ctx, "tenant", nil, "b@example.com"); err != nil {
+		t.Errorf("Check() for a different email = %v, want nil", err)
+	}
+}
+
+func TestCheck_SuccessfulAttemptsDoNotCount(t *testing.T) {
+	svc := setupLoginAttempts(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		svc.Record(ctx, "tenant", nil, "user@example.com", true)
+	}
+
+	if err := svc.Check(ctx, "tenant", nil, "user@example.com"); err != nil {
+		t.Errorf("Check() = %v, want nil — only failed attempts should count", err)
+	}
+}
+```
+
+- [ ] **Langkah 3: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/ratelimit/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 4: Implementasikan loginattempt.go**
+
+Buat `internal/ratelimit/loginattempt.go`:
+```go
+package ratelimit
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"go-api-starter/internal/apperror"
+)
+
+type LoginAttemptService struct {
+	db          *sqlx.DB // pinned to the platform schema
+	maxAttempts int
+	window      time.Duration
+}
+
+func NewLoginAttemptService(platformDB *sqlx.DB, maxAttempts int, window time.Duration) *LoginAttemptService {
+	return &LoginAttemptService{db: platformDB, maxAttempts: maxAttempts, window: window}
+}
+
+// Check returns apperror.RateLimited if email — scoped to scope and, for
+// tenant logins, tenantID — has failed to log in maxAttempts times or more
+// within the last window. Called before verifying credentials, so a
+// blocked caller never even reaches the password check.
+func (s *LoginAttemptService) Check(ctx context.Context, scope string, tenantID *uuid.UUID, email string) error {
+	const query = `
+		SELECT count(*) FROM login_attempts
+		WHERE scope = $1 AND email = $2 AND success = false
+		  AND attempted_at > now() - ($3 * interval '1 second')
+		  AND tenant_id IS NOT DISTINCT FROM $4`
+	var count int
+	err := s.db.GetContext(ctx, &count, query, scope, email, s.window.Seconds(), tenantIDValue(tenantID))
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	if count >= s.maxAttempts {
+		return apperror.RateLimited("terlalu banyak percobaan login, coba lagi nanti")
+	}
+	return nil
+}
+
+// Record logs one login attempt, successful or not. Every login flow calls
+// this exactly once per attempt, after Check and after verifying (or
+// failing to verify) credentials.
+func (s *LoginAttemptService) Record(ctx context.Context, scope string, tenantID *uuid.UUID, email string, success bool) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO login_attempts (id, scope, tenant_id, email, success) VALUES ($1, $2, $3, $4, $5)`,
+		uuid.New(), scope, tenantIDValue(tenantID), email, success,
+	)
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+
+func tenantIDValue(id *uuid.UUID) any {
+	if id == nil {
+		return nil
+	}
+	return *id
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/ratelimit/... -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 6: Commit**
+
+```bash
+git add internal/ratelimit internal/testsupport
+git commit -m "feat: login attempt rate limiting backed by platform.login_attempts"
+```
+
+---
