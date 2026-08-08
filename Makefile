@@ -1,0 +1,22 @@
+.PHONY: run build build-cli test test-integration migrate-platform migrate-tenant
+
+run:
+	air
+
+build:
+	go build -o bin/api ./cmd/api
+
+build-cli:
+	go build -o bin/cli ./cmd/cli
+
+test:
+	go test ./... -short
+
+test-integration:
+	go test ./... -run Integration -v
+
+migrate-platform:
+	go run ./cmd/cli migrate platform up
+
+migrate-tenant:
+	go run ./cmd/cli migrate tenant up --all
