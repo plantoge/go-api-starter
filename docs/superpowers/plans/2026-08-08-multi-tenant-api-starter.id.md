@@ -6035,3 +6035,496 @@ git commit -m "feat: RBAC middleware with permission cache and tenant role servi
 ```
 
 ---
+
+### Tugas 16: Modul auth tenant — login (dengan `tenant_code`), refresh, logout
+
+**Catatan desain:**
+- Setiap body request auth-tenant membawa `tenant_code` — termasuk refresh dan logout — karena refresh token polos tidak menyebutkan schema tenant mana tempat barisnya berada, dan belum ada token yang bisa membawa info itu (itu justru yang sedang ditetapkan oleh login). Client menyimpan `tenant_code` bersama token-nya.
+- Login adalah satu-satunya tempat identitas tenant ditetapkan **tanpa** melewati `RequireTenant` lebih dulu — belum ada token — jadi service menyuntikkan `database.TenantInfo` ke `ctx` sendiri, secara manual, sebelum memanggil `WithTenant`.
+- Interface lookup tenant mengembalikan `middleware.TenantRecord` (dipakai ulang, bukan tipe baru) supaya modul ini tidak perlu struct bentuk-tenant sendiri.
+
+**Berkas:**
+- Buat: `internal/modules/tenant/auth/dto.go`
+- Buat: `internal/modules/tenant/auth/service.go`
+- Buat: `internal/modules/tenant/auth/handler.go`
+- Ubah: `internal/modules/platform/tenant/repository.go` — tambah `FindRecordByCode`
+- Ubah: `internal/testsupport/testsupport.go` — tambah `SeedInSchema` yang di-export
+- Test: `internal/modules/tenant/auth/service_test.go`
+
+**Antarmuka:**
+- Menghasilkan:
+  - `tenantauth.LoginRequest { TenantCode, Email, Password string }`, `RefreshRequest { TenantCode, RefreshToken string }`, `LogoutRequest { TenantCode, RefreshToken string }`
+  - `tenantauth.LoginResponse { AccessToken, RefreshToken string; ExpiresIn int }`
+  - `tenantauth.TenantLookup interface { FindRecordByCode(ctx, code string) (middleware.TenantRecord, error) }`
+  - `tenantauth.NewService(db *database.DB, tenants TenantLookup, tokens *auth.TokenManager, accessTTL, refreshTTL time.Duration, rateLimiter *ratelimit.LoginAttemptService) *Service`
+  - `(s *Service) Login/Refresh/Logout` — bentuknya sama dengan versi platform di Tugas 12.
+  - `tenantauth.NewHandler(svc *Service) *Handler` dengan `Login`, `Refresh`, `Logout` (disambungkan ke rute di Tugas 18).
+  - `(r *tenant.Repository) FindRecordByCode(ctx, code string) (middleware.TenantRecord, error)` — mengimplementasikan `tenantauth.TenantLookup`.
+  - `testsupport.SeedInSchema(t, pool *sqlx.DB, schema, query string, args ...any)`
+
+- [ ] **Langkah 1: Tambah helper seed bersama ke testsupport**
+
+Ubah `internal/testsupport/testsupport.go` — tambahkan:
+```go
+// SeedInSchema runs a fixture-setup query with search_path pinned to
+// schema, for tests that need to insert rows directly rather than going
+// through database.WithTenant themselves.
+func SeedInSchema(t *testing.T, pool *sqlx.DB, schema, query string, args ...any) {
+	t.Helper()
+	tx, err := pool.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL search_path TO "`+schema+`"`); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
+		t.Fatalf("seed query: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+```
+
+- [ ] **Langkah 2: Tambah `FindRecordByCode` ke repository tenant platform**
+
+Ubah `internal/modules/platform/tenant/repository.go` — tambahkan method ini, memakai ulang `FindByCode` dan lookup versi migrasi yang sama seperti `FindByID`:
+```go
+// FindRecordByCode is FindByCode plus a migration-version check, shaped as
+// middleware.TenantRecord — the tenant/auth module's login flow (Task 16)
+// uses this to resolve a tenant_code to enough info to attempt a login.
+func (r *Repository) FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error) {
+	t, err := r.FindByCode(ctx, code)
+	if err != nil {
+		return middleware.TenantRecord{}, err
+	}
+	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
+	if err != nil {
+		return middleware.TenantRecord{}, apperror.Internal(err)
+	}
+	return middleware.TenantRecord{
+		TenantID: t.ID, SchemaName: t.SchemaName, Status: t.Status,
+		SchemaVersion: version, SchemaDirty: dirty,
+	}, nil
+}
+```
+
+- [ ] **Langkah 3: Jalankan test yang ada, pastikan tidak ada yang rusak**
+
+Jalankan: `go test ./internal/modules/platform/tenant/... -v`
+Hasil: PASS — kelima test dari Tugas 14 tetap lolos; ini perubahan yang sifatnya menambah saja.
+
+- [ ] **Langkah 4: Tulis test service yang gagal**
+
+Buat `internal/modules/tenant/auth/service_test.go`:
+```go
+package auth_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/migration"
+	tenantauth "go-api-starter/internal/modules/tenant/auth"
+	"go-api-starter/internal/ratelimit"
+	"go-api-starter/internal/testsupport"
+)
+
+type fakeTenantLookup struct {
+	record middleware.TenantRecord
+}
+
+func (f *fakeTenantLookup) FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error) {
+	return f.record, nil
+}
+
+func setupTenantAuthService(t *testing.T) (*tenantauth.Service, string) {
+	t.Helper()
+	pool := testsupport.OpenTestDB(t)
+	schema := testsupport.RandomSchemaName()
+	if _, err := pool.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+		t.Fatalf("MigrateTenantUp: %v", err)
+	}
+
+	plainPassword := "correct-horse-battery"
+	hash, err := appauth.HashPassword(plainPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	testsupport.SeedInSchema(t, pool, schema,
+		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, 'staff@example.com', $2, 'Staff', true)`,
+		uuid.New(), hash)
+
+	db := database.NewDB(pool)
+	platformPool := testsupport.OpenTestPlatformDB(t)
+	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, 5, 15*time.Minute)
+	lookup := &fakeTenantLookup{record: middleware.TenantRecord{TenantID: uuid.New(), SchemaName: schema, Status: "active"}}
+
+	tokens := appauth.NewTokenManager("test-secret", 15*time.Minute)
+	svc := tenantauth.NewService(db, lookup, tokens, 15*time.Minute, 168*time.Hour, rateLimiter)
+	return svc, plainPassword
+}
+
+func TestLogin_ValidCredentials_ReturnsTokens(t *testing.T) {
+	svc, password := setupTenantAuthService(t)
+
+	res, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: password,
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if res.AccessToken == "" || res.RefreshToken == "" {
+		t.Error("Login() returned an empty token")
+	}
+}
+
+func TestLogin_WrongPassword_ReturnsUnauthorized(t *testing.T) {
+	svc, _ := setupTenantAuthService(t)
+
+	if _, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: "wrong",
+	}); err == nil {
+		t.Fatal("Login() with a wrong password succeeded")
+	}
+}
+
+func TestRefresh_ValidToken_IssuesNewAccessToken(t *testing.T) {
+	svc, password := setupTenantAuthService(t)
+	login, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: password,
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	res, err := svc.Refresh(context.Background(), tenantauth.RefreshRequest{
+		TenantCode: "acme_corp", RefreshToken: login.RefreshToken,
+	})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if res.AccessToken == "" {
+		t.Error("Refresh() returned an empty access token")
+	}
+}
+
+func TestLogout_RevokesRefreshToken(t *testing.T) {
+	svc, password := setupTenantAuthService(t)
+	login, err := svc.Login(context.Background(), tenantauth.LoginRequest{
+		TenantCode: "acme_corp", Email: "staff@example.com", Password: password,
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if err := svc.Logout(context.Background(), tenantauth.LogoutRequest{
+		TenantCode: "acme_corp", RefreshToken: login.RefreshToken,
+	}); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, err := svc.Refresh(context.Background(), tenantauth.RefreshRequest{
+		TenantCode: "acme_corp", RefreshToken: login.RefreshToken,
+	}); err == nil {
+		t.Error("Refresh() succeeded with a revoked refresh token")
+	}
+}
+```
+
+- [ ] **Langkah 5: Jalankan test, pastikan gagal**
+
+Jalankan: `go test ./internal/modules/tenant/auth/... -v`
+Hasil: FAIL — paket tidak compile.
+
+- [ ] **Langkah 6: Implementasikan dto.go**
+
+Buat `internal/modules/tenant/auth/dto.go`:
+```go
+package auth
+
+type LoginRequest struct {
+	TenantCode string `json:"tenant_code" validate:"required"`
+	Email      string `json:"email" validate:"required,email"`
+	Password   string `json:"password" validate:"required"`
+}
+
+type LoginResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+type RefreshRequest struct {
+	TenantCode   string `json:"tenant_code" validate:"required"`
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+type LogoutRequest struct {
+	TenantCode   string `json:"tenant_code" validate:"required"`
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+```
+
+- [ ] **Langkah 7: Implementasikan service.go**
+
+Buat `internal/modules/tenant/auth/service.go`:
+```go
+package auth
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"go-api-starter/internal/apperror"
+	appauth "go-api-starter/internal/auth"
+	"go-api-starter/internal/database"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/ratelimit"
+)
+
+// TenantLookup resolves a tenant_code to enough info to attempt a login.
+// Declared here, consumer-side, and implemented by
+// modules/platform/tenant.Repository (Task 14).
+type TenantLookup interface {
+	FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error)
+}
+
+type tenantUser struct {
+	ID           uuid.UUID `db:"id"`
+	PasswordHash string    `db:"password_hash"`
+	IsActive     bool      `db:"is_active"`
+}
+
+type Service struct {
+	db          *database.DB
+	tenants     TenantLookup
+	tokens      *appauth.TokenManager
+	accessTTL   time.Duration
+	refreshTTL  time.Duration
+	rateLimiter *ratelimit.LoginAttemptService
+}
+
+func NewService(db *database.DB, tenants TenantLookup, tokens *appauth.TokenManager, accessTTL, refreshTTL time.Duration, rateLimiter *ratelimit.LoginAttemptService) *Service {
+	return &Service{db: db, tenants: tenants, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
+}
+
+func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, error) {
+	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
+	if err != nil || tenantRec.Status != "active" {
+		return LoginResponse{}, apperror.Unauthorized("tenant_code, email, atau password salah")
+	}
+
+	if err := s.rateLimiter.Check(ctx, appauth.ScopeTenant, &tenantRec.TenantID, req.Email); err != nil {
+		return LoginResponse{}, err
+	}
+
+	// Login is the one place tenant identity is established without a
+	// prior RequireTenant pass — there's no token yet — so TenantInfo is
+	// injected into ctx by hand before using WithTenant.
+	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
+		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
+	})
+
+	var u tenantUser
+	found := false
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		getErr := tx.Get(&u, `SELECT id, password_hash, is_active FROM users WHERE email = $1 AND deleted_at IS NULL`, req.Email)
+		if getErr == nil {
+			found = true
+		}
+		return nil // a missing user isn't a transaction failure — just an invalid login
+	})
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	valid := found && u.IsActive && appauth.VerifyPassword(u.PasswordHash, req.Password)
+	s.rateLimiter.Record(ctx, appauth.ScopeTenant, &tenantRec.TenantID, req.Email, valid)
+	if !valid {
+		return LoginResponse{}, apperror.Unauthorized("tenant_code, email, atau password salah")
+	}
+
+	return s.issueTokens(tenantCtx, tenantRec.TenantID, u.ID)
+}
+
+func (s *Service) issueTokens(tenantCtx context.Context, tenantID, userID uuid.UUID) (LoginResponse, error) {
+	access, err := s.tokens.IssueAccessToken(userID, appauth.ScopeTenant, &tenantID)
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	plain, hash, err := appauth.GenerateRefreshToken()
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		_, execErr := tx.Exec(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+			uuid.New(), userID, hash, time.Now().Add(s.refreshTTL))
+		return execErr
+	})
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+
+	return LoginResponse{AccessToken: access, RefreshToken: plain, ExpiresIn: int(s.accessTTL.Seconds())}, nil
+}
+
+func (s *Service) Refresh(ctx context.Context, req RefreshRequest) (LoginResponse, error) {
+	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
+	if err != nil || tenantRec.Status != "active" {
+		return LoginResponse{}, apperror.Unauthorized("refresh token tidak valid")
+	}
+	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
+		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
+	})
+
+	hash := appauth.HashRefreshToken(req.RefreshToken)
+	var row struct {
+		UserID    uuid.UUID  `db:"user_id"`
+		ExpiresAt time.Time  `db:"expires_at"`
+		RevokedAt *time.Time `db:"revoked_at"`
+	}
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		return tx.Get(&row, `SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = $1`, hash)
+	})
+	if err != nil {
+		return LoginResponse{}, apperror.Unauthorized("refresh token tidak valid")
+	}
+	if row.RevokedAt != nil || time.Now().After(row.ExpiresAt) {
+		return LoginResponse{}, apperror.Unauthorized("refresh token sudah tidak berlaku")
+	}
+
+	access, err := s.tokens.IssueAccessToken(row.UserID, appauth.ScopeTenant, &tenantRec.TenantID)
+	if err != nil {
+		return LoginResponse{}, apperror.Internal(err)
+	}
+	return LoginResponse{AccessToken: access, RefreshToken: req.RefreshToken, ExpiresIn: int(s.accessTTL.Seconds())}, nil
+}
+
+func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
+	tenantRec, err := s.tenants.FindRecordByCode(ctx, req.TenantCode)
+	if err != nil {
+		return apperror.Unauthorized("tenant tidak ditemukan")
+	}
+	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
+		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
+	})
+
+	hash := appauth.HashRefreshToken(req.RefreshToken)
+	err = s.db.WithTenant(tenantCtx, func(tx *sqlx.Tx) error {
+		_, execErr := tx.Exec(`UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, hash)
+		return execErr
+	})
+	if err != nil {
+		return apperror.Internal(err)
+	}
+	return nil
+}
+```
+
+- [ ] **Langkah 8: Jalankan test, pastikan lolos**
+
+Jalankan: `go test ./internal/modules/tenant/auth/... -v`
+Hasil: PASS — keempat test lolos.
+
+- [ ] **Langkah 9: Implementasikan handler**
+
+Buat `internal/modules/tenant/auth/handler.go`:
+```go
+package auth
+
+import (
+	"github.com/gofiber/fiber/v2"
+
+	"go-api-starter/internal/apperror"
+	"go-api-starter/internal/middleware"
+	"go-api-starter/internal/response"
+	"go-api-starter/internal/validator"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+func badBody(c *fiber.Ctx) error {
+	return response.Error(c, middleware.RequestIDFromCtx(c),
+		apperror.Validation(map[string][]string{"_": {"badan permintaan tidak valid"}}))
+}
+
+func (h *Handler) Login(c *fiber.Ctx) error {
+	var req LoginRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+	res, err := h.svc.Login(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, res)
+}
+
+func (h *Handler) Refresh(c *fiber.Ctx) error {
+	var req RefreshRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+	res, err := h.svc.Refresh(c.UserContext(), req)
+	if err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, res)
+}
+
+func (h *Handler) Logout(c *fiber.Ctx) error {
+	var req LogoutRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badBody(c)
+	}
+	if verr := validator.Validate(req); verr != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), verr)
+	}
+	if err := h.svc.Logout(c.UserContext(), req); err != nil {
+		return response.Error(c, middleware.RequestIDFromCtx(c), err)
+	}
+	return response.Success(c, 200, fiber.Map{"message": "berhasil logout"})
+}
+```
+
+- [ ] **Langkah 10: Pastikan bisa di-build**
+
+Jalankan: `go build ./...`
+Hasil: berhasil.
+
+- [ ] **Langkah 11: Commit**
+
+```bash
+git add internal/modules/tenant/auth internal/modules/platform/tenant/repository.go internal/testsupport
+git commit -m "feat: tenant auth (login/refresh/logout) with tenant_code resolution"
+```
+
+---
