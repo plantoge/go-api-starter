@@ -22,3 +22,6 @@ coverage.html
 # OS
 .DS_Store
 Thumbs.db
+
+# Graphify
+graphify-out
