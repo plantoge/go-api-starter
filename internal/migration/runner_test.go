@@ -50,7 +50,7 @@ func TestMigrateTenantUp_AndVersionReporting(t *testing.T) {
 	}
 	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
 
-	if err := migration.MigrateTenantUp(db, schema); err != nil {
+	if err := migration.MigrateTenantUp(testsupport.TestDSN(), schema); err != nil {
 		t.Fatalf("MigrateTenantUp: %v", err)
 	}
 

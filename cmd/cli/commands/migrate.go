@@ -99,7 +99,7 @@ func cmdMigrateTenantUp(args []string) error {
 	done := 0
 	for _, tgt := range targets {
 		fmt.Printf("migrating %s ... ", tgt.code)
-		if err := migration.MigrateTenantUp(db, tgt.schemaName); err != nil {
+		if err := migration.MigrateTenantUp(cfg.DB.DSN(), tgt.schemaName); err != nil {
 			fmt.Println("FAILED")
 			return fmt.Errorf("tenant %s: %w (stopped after %d of %d tenants)",
 				tgt.code, err, done, len(targets))

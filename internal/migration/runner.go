@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,8 +120,35 @@ func readUpFiles(fsys embed.FS, dir string) ([]MigrationFile, error) {
 // MigrateTenantUp applies every unapplied migration under tenant/ to the
 // given tenant schema, which must already exist (provisioning creates it
 // before calling this).
-func MigrateTenantUp(db *sql.DB, schemaName string) error {
-	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
+//
+// Amendment: golang-migrate's postgres driver's SchemaName config option
+// only scopes its own schema_migrations tracking table — it never sets
+// search_path on the connection, so it does nothing to scope the migration
+// files' own SQL bodies. Tenant migration files are intentionally written
+// unqualified (no schema prefix), since the tenant's schema name isn't
+// known until provisioning time — that design relies entirely on
+// search_path being correctly pinned before the files execute. Without
+// this fix, every tenant migration silently ran against "public" instead
+// of the intended tenant schema: invisible until this function was
+// actually exercised against a live PostgreSQL database (it never was,
+// until this point — every DB-dependent test had only ever skipped). A
+// second tenant migrated this way collided immediately with "relation
+// already exists", which is how this was caught. Platform migrations are
+// unaffected — their SQL fully qualifies every object with a "platform."
+// prefix, so they never depended on search_path in the first place.
+//
+// dsn (not an already-open *sql.DB) is required here because the fix opens
+// its own dedicated, single-connection *sql.DB scoped to schemaName via
+// the connection's "options" parameter — a shared pooled *sql.DB can't be
+// safely re-scoped per call.
+func MigrateTenantUp(dsn string, schemaName string) error {
+	scopedDB, err := openScopedDB(dsn, schemaName)
+	if err != nil {
+		return fmt.Errorf("connect (scoped to %s): %w", schemaName, err)
+	}
+	defer scopedDB.Close()
+
+	m, err := newMigrate(scopedDB, TenantFS, "tenant", schemaName)
 	if err != nil {
 		return err
 	}
@@ -128,6 +156,29 @@ func MigrateTenantUp(db *sql.DB, schemaName string) error {
 		return err
 	}
 	return nil
+}
+
+// openScopedDB opens a dedicated, single-connection *sql.DB whose
+// search_path is pinned to schemaName via the connection's "options"
+// parameter (equivalent to `psql -c "SET search_path TO schemaName"` at
+// connect time, applied to every statement on this connection). Pinned to
+// exactly one physical connection (SetMaxOpenConns(1)) so the search_path
+// setting can never be silently dropped by handing a later statement to a
+// different pooled connection that never had it set. Callers must Close()
+// the returned db when done — it's a throwaway, single-purpose handle, not
+// meant to be shared or long-lived.
+func openScopedDB(dsn, schemaName string) (*sql.DB, error) {
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	scopedDSN := dsn + sep + "options=-c%20search_path%3D" + url.QueryEscape(schemaName)
+	db, err := sql.Open("pgx", scopedDSN)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
 }
 
 // TenantSchemaVersion reports the migration version currently applied to

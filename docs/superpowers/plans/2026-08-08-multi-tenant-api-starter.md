@@ -2342,13 +2342,57 @@ Expected: FAIL — `migration.MigrateTenantUp` etc. undefined.
 
 - [ ] **Step 5: Extend the runner**
 
+**Amendment (added after this plan's implementation was complete, once the
+suite was finally run against a real PostgreSQL database instead of only
+ever skipping): the original `MigrateTenantUp` below is a serious bug.**
+golang-migrate's `postgres.Config.SchemaName` option (used in `newMigrate`)
+only scopes where golang-migrate stores its OWN `schema_migrations`
+tracking table — it never sets `search_path` on the connection, so it does
+nothing to scope the migration FILES' own SQL bodies. Tenant migration
+files are intentionally written unqualified (no schema prefix), since the
+tenant's schema name isn't known until provisioning time — that design
+relies entirely on `search_path` being correctly pinned before the files
+execute. Without an explicit fix, every tenant migration applied through
+this function silently ran against `public` instead of the intended
+tenant schema — invisible in every dry run because this function was never
+once exercised against a live database until after all 22 tasks and the
+final whole-branch review were already complete. A second tenant migrated
+this way collided immediately with "relation already exists" against the
+first tenant's tables in `public` — that's how it was caught. Platform
+migrations are unaffected: their SQL fully qualifies every object with a
+`platform.` prefix, so `MigratePlatformUp` never depended on `search_path`
+in the first place. Tenant *provisioning* (`Provision`, Task 14) is also
+unaffected — it applies migrations by hand inside its own transaction with
+an explicit `SET LOCAL search_path`, not via this function at all. Only
+`MigrateTenantUp` — i.e. `cli migrate tenant up`, the command that applies
+*new* migrations to *already-provisioned* tenants — was broken.
+
+The fix: `MigrateTenantUp` now takes a DSN string, not an already-open
+`*sql.DB`, and opens its own dedicated, single-connection `*sql.DB` scoped
+to the tenant's schema via the connection's `options` parameter (the
+`options=-c search_path=<schema>` technique — verified working against
+this project's actual pgx/v5 driver before being adopted). Every caller
+that previously passed an open `db`/`pool.DB` now passes the DSN string
+instead (`cfg.DB.DSN()` in the CLI, `testsupport.TestDSN()` — a new
+exported helper — in tests).
+
 Modify `internal/migration/runner.go` — append these functions at the end of the file:
 ```go
 // MigrateTenantUp applies every unapplied migration under tenant/ to the
 // given tenant schema, which must already exist (provisioning creates it
-// before calling this).
-func MigrateTenantUp(db *sql.DB, schemaName string) error {
-	m, err := newMigrate(db, TenantFS, "tenant", schemaName)
+// before calling this). dsn (not an already-open *sql.DB) is required
+// because this opens its own dedicated, single-connection *sql.DB scoped
+// to schemaName via the connection's "options" parameter — a shared
+// pooled *sql.DB can't be safely re-scoped per call. See the amendment
+// note above for why this is necessary.
+func MigrateTenantUp(dsn string, schemaName string) error {
+	scopedDB, err := openScopedDB(dsn, schemaName)
+	if err != nil {
+		return fmt.Errorf("connect (scoped to %s): %w", schemaName, err)
+	}
+	defer scopedDB.Close()
+
+	m, err := newMigrate(scopedDB, TenantFS, "tenant", schemaName)
 	if err != nil {
 		return err
 	}
@@ -2356,6 +2400,27 @@ func MigrateTenantUp(db *sql.DB, schemaName string) error {
 		return err
 	}
 	return nil
+}
+
+// openScopedDB opens a dedicated, single-connection *sql.DB whose
+// search_path is pinned to schemaName via the connection's "options"
+// parameter (equivalent to `SET search_path TO schemaName` applied to
+// every statement on this connection). Pinned to exactly one physical
+// connection (SetMaxOpenConns(1)) so the setting can never be silently
+// dropped by handing a later statement to a different pooled connection
+// that never had it set. Callers must Close() the returned db when done.
+func openScopedDB(dsn, schemaName string) (*sql.DB, error) {
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	scopedDSN := dsn + sep + "options=-c%20search_path%3D" + url.QueryEscape(schemaName)
+	db, err := sql.Open("pgx", scopedDSN)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
 }
 
 // TenantSchemaVersion reports the migration version currently applied to

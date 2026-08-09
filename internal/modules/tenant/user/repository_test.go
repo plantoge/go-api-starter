@@ -20,7 +20,7 @@ func setupUserRepo(t *testing.T) (*tenantuser.Repository, context.Context) {
 		t.Fatalf("create schema: %v", err)
 	}
 	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
-	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+	if err := migration.MigrateTenantUp(testsupport.TestDSN(), schema); err != nil {
 		t.Fatalf("MigrateTenantUp: %v", err)
 	}
 

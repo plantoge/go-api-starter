@@ -14,15 +14,13 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// OpenTestDB connects to the app_test database described by .env.test at
-// the repo root. It skips (not fails) the calling test when no local
-// PostgreSQL is reachable, so `go test ./...` stays usable on a machine
-// that hasn't set one up — the machine that has gets full coverage.
-func OpenTestDB(t *testing.T) *sqlx.DB {
-	t.Helper()
+// TestDSN returns the connection string OpenTestDB would use to connect,
+// without actually connecting — for callers (like migration.MigrateTenantUp)
+// that need a DSN string rather than an already-open *sqlx.DB, e.g. to open
+// their own dedicated, schema-scoped connection.
+func TestDSN() string {
 	_ = godotenv.Load(findEnvTestFile())
-
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
 		getenv("DB_USER", "app"),
 		getenv("DB_PASSWORD", "changeme"),
 		getenv("DB_HOST", "localhost"),
@@ -30,6 +28,15 @@ func OpenTestDB(t *testing.T) *sqlx.DB {
 		getenv("DB_NAME", "app_test"),
 		getenv("DB_SSLMODE", "disable"),
 	)
+}
+
+// OpenTestDB connects to the app_test database described by .env.test at
+// the repo root. It skips (not fails) the calling test when no local
+// PostgreSQL is reachable, so `go test ./...` stays usable on a machine
+// that hasn't set one up — the machine that has gets full coverage.
+func OpenTestDB(t *testing.T) *sqlx.DB {
+	t.Helper()
+	dsn := TestDSN()
 
 	db, err := sqlx.Connect("pgx", dsn)
 	if err != nil {
@@ -113,7 +120,12 @@ func getenv(key, fallback string) string {
 }
 
 func findEnvTestFile() string {
-	candidates := []string{".env.test", "../../.env.test", "../../../.env.test"}
+	// Amendment: the original three candidates topped out at 3 levels up,
+	// which never reaches the repo root from a 4-levels-deep package (e.g.
+	// internal/modules/tenant/auth) — those packages silently fell back to
+	// the DB_USER/DB_PASSWORD defaults instead of .env.test's real values.
+	// Extended to 5 levels; the deepest package in this repo is 4.
+	candidates := []string{".env.test", "../../.env.test", "../../../.env.test", "../../../../.env.test", "../../../../../.env.test"}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c

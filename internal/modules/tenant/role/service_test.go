@@ -22,7 +22,7 @@ func setupRoleService(t *testing.T) (*role.Service, database.TenantInfo, *sqlx.D
 		t.Fatalf("create schema: %v", err)
 	}
 	t.Cleanup(func() { pool.Exec("DROP SCHEMA " + schema + " CASCADE") })
-	if err := migration.MigrateTenantUp(pool.DB, schema); err != nil {
+	if err := migration.MigrateTenantUp(testsupport.TestDSN(), schema); err != nil {
 		t.Fatalf("MigrateTenantUp: %v", err)
 	}
 	if _, err := permission.Sync(context.Background(), pool.DB, schema); err != nil {
