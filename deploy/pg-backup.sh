@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PGPASSWORD="${DB_PASSWORD:-}"
+
 BACKUP_DIR="/var/backups/app-db"
 mkdir -p "$BACKUP_DIR"
 
