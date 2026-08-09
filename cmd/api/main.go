@@ -32,7 +32,10 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("config", "error", err)
+		// Printed rather than logged: this fails before the process has a
+		// configured logger, the only reader is a human at a terminal, and
+		// slog would escape the newlines that make the list readable.
+		fmt.Fprintln(os.Stderr, config.Explain(err))
 		os.Exit(1)
 	}
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,53 @@ func TestLoad_MissingRequired(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "DB_HOST") || !strings.Contains(msg, "JWT_SECRET") {
 		t.Errorf("error %q does not mention both missing vars", msg)
+	}
+}
+
+// Error() must stay on one line: slog quotes any attribute value
+// containing a newline, which would print "\n" literally instead of
+// breaking the line. Multiline() is the terminal-facing form and is the
+// only one allowed to contain newlines.
+func TestValidationError_Rendering(t *testing.T) {
+	ve := &ValidationError{Problems: []string{"DB_HOST wajib diisi", "JWT_SECRET minimal 32 karakter"}}
+
+	if strings.Contains(ve.Error(), "\n") {
+		t.Errorf("Error() mengandung baris baru: %q", ve.Error())
+	}
+	for _, p := range ve.Problems {
+		if !strings.Contains(ve.Error(), p) {
+			t.Errorf("Error() tidak menyebut %q", p)
+		}
+		if !strings.Contains(ve.Multiline(), "  - "+p+"\n") {
+			t.Errorf("Multiline() tidak memuat baris untuk %q", p)
+		}
+	}
+}
+
+func TestExplain_UsesMultilineForValidationError(t *testing.T) {
+	ve := &ValidationError{Problems: []string{"DB_HOST wajib diisi"}}
+	if got := Explain(ve); got != ve.Multiline() {
+		t.Errorf("Explain() = %q, ingin bentuk Multiline()", got)
+	}
+
+	plain := errors.New("kegagalan lain")
+	if got := Explain(plain); got != "kegagalan lain" {
+		t.Errorf("Explain() = %q, ingin pesan asli apa adanya", got)
+	}
+}
+
+func TestLoad_ReturnsValidationError(t *testing.T) {
+	env := validEnv()
+	delete(env, "DB_HOST")
+	setEnv(t, env)
+
+	_, err := Load()
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("Load() error bertipe %T, ingin *ValidationError", err)
+	}
+	if len(ve.Problems) == 0 {
+		t.Error("ValidationError.Problems kosong")
 	}
 }
 

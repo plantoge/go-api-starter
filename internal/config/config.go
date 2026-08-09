@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,6 +10,46 @@ import (
 
 	"github.com/joho/godotenv"
 )
+
+// ValidationError collects every configuration problem at once, so a
+// misconfigured deploy fails once with a complete list instead of one env
+// var per attempt.
+//
+// It renders two ways because the readers differ. Error() is the form that
+// ends up in structured logs: a single line, because slog's handlers quote
+// any value containing newlines — an embedded "\n" would be printed
+// literally as two characters rather than breaking the line. Multiline() is
+// for a terminal, where one problem per line is far easier to scan.
+type ValidationError struct {
+	Problems []string
+}
+
+func (e *ValidationError) Error() string {
+	return "konfigurasi tidak valid: " + strings.Join(e.Problems, "; ")
+}
+
+func (e *ValidationError) Multiline() string {
+	var b strings.Builder
+	b.WriteString("Konfigurasi tidak valid — perbaiki dulu sebelum menjalankan aplikasi:\n")
+	for _, p := range e.Problems {
+		b.WriteString("  - ")
+		b.WriteString(p)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nSalin .env.example menjadi .env lalu isi nilainya — lihat docs/getting-started.md.")
+	return b.String()
+}
+
+// Explain picks the most readable rendering of an error for terminal
+// output. Both cmd/api and cmd/cli use it so a configuration failure looks
+// the same whichever binary hit it.
+func Explain(err error) string {
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return ve.Multiline()
+	}
+	return err.Error()
+}
 
 type DBConfig struct {
 	Host            string
@@ -71,7 +112,7 @@ func Load() (*Config, error) {
 	req := func(key string) string {
 		v := os.Getenv(key)
 		if v == "" {
-			errs = append(errs, key+" is required")
+			errs = append(errs, key+" wajib diisi")
 		}
 		return v
 	}
@@ -82,7 +123,7 @@ func Load() (*Config, error) {
 		}
 		n, err := strconv.Atoi(raw)
 		if err != nil {
-			errs = append(errs, key+" must be an integer: "+err.Error())
+			errs = append(errs, fmt.Sprintf("%s harus berupa bilangan bulat, dapat %q", key, raw))
 		}
 		return n
 	}
@@ -93,7 +134,7 @@ func Load() (*Config, error) {
 		}
 		d, err := time.ParseDuration(raw)
 		if err != nil {
-			errs = append(errs, key+" must be a duration (e.g. 15m): "+err.Error())
+			errs = append(errs, fmt.Sprintf("%s harus berupa durasi seperti 15m, 168h, atau 30s, dapat %q", key, raw))
 		}
 		return d
 	}
@@ -137,11 +178,11 @@ func Load() (*Config, error) {
 	// verbatim without ever editing it, rather than to enforce true
 	// entropy (which a length check can't measure anyway).
 	if cfg.JWT.Secret != "" && len(cfg.JWT.Secret) < 32 {
-		errs = append(errs, "JWT_SECRET must be at least 32 characters")
+		errs = append(errs, "JWT_SECRET minimal 32 karakter")
 	}
 
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
+		return nil, &ValidationError{Problems: errs}
 	}
 	return cfg, nil
 }

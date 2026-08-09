@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"go-api-starter/cmd/cli/commands"
+	"go-api-starter/internal/config"
 )
 
 func main() {
@@ -23,7 +25,12 @@ func main() {
 	}
 
 	if err := handler(rest); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			fmt.Fprintln(os.Stderr, ve.Multiline())
+		} else {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
