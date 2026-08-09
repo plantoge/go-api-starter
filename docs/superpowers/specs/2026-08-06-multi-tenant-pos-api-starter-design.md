@@ -1,4 +1,4 @@
-# Multi-Tenant API Starter (Schema-per-Tenant) — Design
+# Desain: Multi-Tenant API Starter (Satu Schema per Tenant)
 
 **Tanggal:** 2026-08-06 (revisi 2026-08-07)
 **Status:** Disetujui

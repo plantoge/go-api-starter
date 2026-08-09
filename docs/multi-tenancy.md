@@ -1,12 +1,12 @@
-# Multi-Tenancy Rules
+# Aturan Multi-Tenancy
 
-These two rules are what keep tenant A's data from ever appearing in
-tenant B's response. Breaking either one is a data breach, not a bug.
+Dua aturan di bawah inilah yang mencegah data tenant A muncul di response
+tenant B. Melanggar salah satunya adalah kebocoran data, bukan sekadar bug.
 
-## Rule 1: all tenant data access goes through `database.WithTenant`
+## Aturan 1: semua akses data tenant lewat `database.WithTenant`
 
 ```go
-// Right
+// Benar
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
 	var u User
 	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
@@ -16,33 +16,33 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
 }
 ```
 ```go
-// Wrong — bypasses tenant scoping entirely
+// Salah — melewati tenant scoping sepenuhnya
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
 	var u User
-	err := r.pool.Get(&u, `SELECT * FROM users WHERE id = $1`, id) // which tenant?!
+	err := r.pool.Get(&u, `SELECT * FROM users WHERE id = $1`, id) // tenant yang mana?!
 	return u, err
 }
 ```
-`WithTenant` runs your query inside a transaction with `SET LOCAL
-search_path` pinned to the calling tenant's schema — resolved from
-`context.Context`, never from a request parameter. `SET LOCAL` is
-automatically cleared when the transaction ends (commit or rollback), so a
-connection can never carry one tenant's schema into the next caller that
-borrows it from the pool.
+`WithTenant` menjalankan query di dalam sebuah transaksi dengan `SET LOCAL
+search_path` yang dipatok ke schema milik tenant pemanggil — diambil dari
+`context.Context`, tidak pernah dari parameter request. `SET LOCAL` otomatis
+dibersihkan saat transaksi berakhir (commit atau rollback), sehingga sebuah
+koneksi tidak pernah bisa membawa schema satu tenant ke pemanggil berikutnya
+yang meminjam koneksi itu dari pool.
 
-## Rule 2: `*fiber.Ctx` stops at the handler
+## Aturan 2: `*fiber.Ctx` berhenti di handler
 
-Fiber is built on `fasthttp`, which **reuses** its context objects between
-requests for performance. If a `*fiber.Ctx` (or anything derived from it)
-escapes into a goroutine or gets stored anywhere, it can be silently
-overwritten by a completely different request — including a different
-tenant's — before it's read back.
+Fiber dibangun di atas `fasthttp`, yang **memakai ulang** object context-nya
+antar request demi performa. Kalau sebuah `*fiber.Ctx` (atau apa pun yang
+diturunkan darinya) lolos ke dalam goroutine atau disimpan di suatu tempat,
+isinya bisa diam-diam tertimpa oleh request yang sama sekali berbeda —
+termasuk request milik tenant lain — sebelum sempat dibaca kembali.
 
 ```go
-// Right — handler converts everything it needs before calling the service
+// Benar — handler mengonversi semua yang dibutuhkan sebelum memanggil service
 func (h *Handler) Get(c *fiber.Ctx) error {
 	id, _ := uuid.Parse(c.Params("id"))
-	view, err := h.svc.Get(c.UserContext(), id) // context.Context only, from here down
+	view, err := h.svc.Get(c.UserContext(), id) // mulai dari sini ke bawah: context.Context saja
 	if err != nil {
 		return response.Error(c, middleware.RequestIDFromCtx(c), err)
 	}
@@ -50,27 +50,28 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 }
 ```
 ```go
-// Wrong — never do this
+// Salah — jangan pernah lakukan ini
 func (h *Handler) Get(c *fiber.Ctx) error {
 	go func() {
-		log.Println(c.Params("id")) // c may belong to a different request by now
+		log.Println(c.Params("id")) // c bisa jadi sudah milik request lain sekarang
 	}()
 	return nil
 }
 ```
-Services and repositories only ever see `context.Context`. This isn't just
-a safety rule — it also means business logic can be unit tested without
-starting an HTTP server.
+Service dan repository hanya boleh melihat `context.Context`. Ini bukan
+sekadar aturan keamanan — efek sampingnya, business logic bisa di-unit test
+tanpa menjalankan HTTP server.
 
-## What ends up in `context.Context`
+## Apa saja yang ada di dalam `context.Context`
 
-Set by middleware, read via `database.TenantFromContext` /
+Diisi oleh middleware, dibaca lewat `database.TenantFromContext` /
 `database.ActorFromContext`:
-- `database.TenantInfo` — tenant ID + schema name, set by `RequireTenant`
-- `database.Actor` — user ID + scope, set by `RequirePlatform` /
+- `database.TenantInfo` — ID tenant + nama schema, diisi oleh `RequireTenant`
+- `database.Actor` — ID user + scope, diisi oleh `RequirePlatform` /
   `RequireTenant`
 
-The one exception is login: there's no token yet to prove tenant identity,
-so `modules/tenant/auth.Service.Login` constructs `TenantInfo` itself from
-the resolved `tenant_code`, before calling `WithTenant`. Every other
-tenant-scoped code path receives it already set by middleware.
+Satu-satunya pengecualian adalah login: pada titik itu belum ada token yang
+membuktikan identitas tenant, jadi `modules/tenant/auth.Service.Login`
+menyusun `TenantInfo` sendiri dari `tenant_code` yang sudah diresolusi,
+sebelum memanggil `WithTenant`. Semua jalur kode tenant-scoped lainnya
+menerimanya dalam keadaan sudah diisi oleh middleware.

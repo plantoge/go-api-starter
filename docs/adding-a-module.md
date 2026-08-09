@@ -1,55 +1,58 @@
-# Adding a Module
+# Menambahkan Modul
 
-Every tenant-scoped module follows the shape of
-`internal/modules/tenant/user/` — copy that folder as your starting point.
+Setiap modul tenant-scoped mengikuti bentuk
+`internal/modules/tenant/user/` — salin folder itu sebagai titik awal.
 
-## File shape
+## Bentuk file
 
 ```
 modules/tenant/<name>/
-  model.go       # DB row struct(s), `db:"..."` tags
-  dto.go         # request/response structs, `json:"..."` + `validate:"..."` tags
-  repository.go  # SQL via sqlx, always through database.WithTenant
-  service.go     # business logic, context.Context only, no HTTP types
-  handler.go     # Fiber only, converts to/from DTOs, never touches SQL
+  model.go       # struct baris DB, tag `db:"..."`
+  dto.go         # struct request/response, tag `json:"..."` + `validate:"..."`
+  repository.go  # SQL via sqlx, selalu lewat database.WithTenant
+  service.go     # business logic, context.Context saja, tanpa tipe HTTP
+  handler.go     # Fiber saja, konversi ke/dari DTO, tidak pernah menyentuh SQL
 ```
 
-## Steps
+## Langkah-langkah
 
-1. **Add a migration.** Create
-   `internal/migration/tenant/0000N_create_<name>_table.up.sql` (and
-   `.down.sql`), following `database-conventions.md` for audit columns and
-   soft delete. Bump the version number.
-2. **Write `model.go`** — one struct per table, `db:"..."` tags matching
-   column names exactly.
-3. **Write `repository.go`** — every method wraps its query in
-   `db.WithTenant(ctx, func(tx *sqlx.Tx) error {...})`. Declare a
-   `Sortable map[string]string` whitelist for anything the list endpoint
-   can sort by — never accept a raw `sort` query value.
-4. **Write `dto.go`** — request structs with `validate:"..."` tags, a
-   `View` struct for responses, and a `toView` mapper.
-5. **Write `service.go`** — depends only on the repository and
-   `context.Context`. Password hashing, external calls, or cross-module
-   calls (via another module's *service*, never its repository) go here.
-6. **Write `handler.go`** — parse the body, call `validator.Validate`,
-   call the service, translate the result with `response.Success` /
-   `response.Error`. Never write `c.Status(...)` directly.
-7. **Add permission constants** in `internal/permission/constants.go` for
-   the new resource (`<name>.view`, `<name>.create`, ...), following the
-   existing `user.*` ones.
-8. **Wire routes** in `internal/server/router.go`, inside the `tenantAPI`
-   group, each behind
+1. **Tambahkan migrasi.** Buat
+   `internal/migration/tenant/0000N_create_<name>_table.up.sql` (dan
+   `.down.sql`), mengikuti `database-conventions.md` untuk kolom audit dan
+   soft delete. Naikkan nomor versinya.
+2. **Tulis `model.go`** — satu struct per tabel, tag `db:"..."` yang persis
+   sama dengan nama kolomnya.
+3. **Tulis `repository.go`** — setiap method membungkus query-nya dalam
+   `db.WithTenant(ctx, func(tx *sqlx.Tx) error {...})`. Deklarasikan
+   whitelist `Sortable map[string]string` untuk apa pun yang boleh dipakai
+   mengurutkan di endpoint list — jangan pernah menerima nilai query `sort`
+   mentah.
+4. **Tulis `dto.go`** — struct request dengan tag `validate:"..."`, sebuah
+   struct `View` untuk response, dan mapper `toView`.
+5. **Tulis `service.go`** — hanya bergantung pada repository dan
+   `context.Context`. Hashing password, pemanggilan eksternal, atau
+   pemanggilan lintas modul (lewat *service* modul lain, tidak pernah lewat
+   repository-nya) ditempatkan di sini.
+6. **Tulis `handler.go`** — parse body, panggil `validator.Validate`,
+   panggil service, terjemahkan hasilnya dengan `response.Success` /
+   `response.Error`. Jangan pernah menulis `c.Status(...)` langsung.
+7. **Tambahkan konstanta permission** di `internal/permission/constants.go`
+   untuk resource baru (`<name>.view`, `<name>.create`, ...), mengikuti pola
+   `user.*` yang sudah ada.
+8. **Sambungkan route** di `internal/server/router.go`, di dalam grup
+   `tenantAPI`, masing-masing di balik
    `middleware.RequirePermission(permission.YourConstant, deps.PermissionCache)`.
-9. **Add the handler to `server.Dependencies`** and construct it in
+9. **Tambahkan handler ke `server.Dependencies`** dan buat instance-nya di
    `cmd/api/main.go`.
-10. **Run `cli permission sync --all`** after deploying, so existing
-    tenants get the new permission rows.
+10. **Jalankan `cli permission sync --all`** setelah deploy, supaya tenant
+    yang sudah ada mendapatkan baris permission yang baru.
 
-## Sub-grouping modules
+## Pengelompokan sub-modul
 
-Keep `modules/tenant/` flat until it holds 7–8 modules and navigation gets
-hard. Then group by domain, e.g. `modules/tenant/sales/order/`,
-`modules/tenant/inventory/product/` — the module itself doesn't change
-shape, only its path. **Modules must not call another module's repository
-directly** — cross-module interaction always goes through the other
-module's *service*.
+Biarkan `modules/tenant/` tetap rata sampai isinya mencapai 7–8 modul dan
+navigasinya mulai menyulitkan. Setelah itu kelompokkan berdasarkan domain,
+misalnya `modules/tenant/sales/order/`,
+`modules/tenant/inventory/product/` — bentuk modulnya sendiri tidak
+berubah, hanya path-nya. **Modul tidak boleh memanggil repository modul
+lain secara langsung** — interaksi lintas modul selalu lewat *service*
+modul tersebut.

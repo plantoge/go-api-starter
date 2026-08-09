@@ -1,23 +1,24 @@
 # Deployment
 
-No Docker anywhere in this stack — Go compiles to one static binary, so
-the server needs nothing beyond that binary, PostgreSQL, and Caddy.
+Tidak ada Docker sama sekali di stack ini — Go dikompilasi menjadi satu
+binary statis, jadi server tidak butuh apa pun selain binary tersebut,
+PostgreSQL, dan Caddy.
 
-## Layout on the server
+## Susunan di server
 
 ```
 /opt/app/
-  api               # HTTP server binary
-  cli               # CLI binary (migrations, provisioning, cleanup)
-  api.backup        # previous binary, for instant rollback
+  api               # binary HTTP server
+  cli               # binary CLI (migrasi, provisioning, cleanup)
+  api.backup        # binary sebelumnya, untuk rollback instan
 
-/etc/app/api.env    # config, chmod 600
+/etc/app/api.env    # konfigurasi, chmod 600
 /etc/systemd/system/app-api.service
 /etc/systemd/system/app-cleanup.service
 /etc/systemd/system/app-cleanup.timer
 ```
 
-## First-time setup
+## Setup pertama kali
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin app
@@ -25,43 +26,44 @@ sudo mkdir -p /opt/app /etc/app
 sudo chown app:app /opt/app
 git clone <your-repo-url> /opt/app
 sudo cp deploy/app-api.service deploy/app-cleanup.service deploy/app-cleanup.timer /etc/systemd/system/
-sudo cp .env.example /etc/app/api.env   # then edit it with real values
+sudo cp .env.example /etc/app/api.env   # lalu edit dengan nilai sebenarnya
 sudo chmod 600 /etc/app/api.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now app-cleanup.timer
 ```
 
-Install Caddy, then:
+Pasang Caddy, lalu:
 ```bash
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # edit the domain first
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # edit domainnya lebih dulu
 sudo systemctl reload caddy
 ```
 
 ### Ubuntu/Debian vs Rocky
 
-Package manager differs (`apt install postgresql caddy` vs
-`dnf install postgresql-server caddy`); everything else — systemd units,
-the Go binary, the deploy script — is identical.
+Yang berbeda hanya package manager-nya (`apt install postgresql caddy` vs
+`dnf install postgresql-server caddy`); selebihnya — unit systemd, binary
+Go, script deploy — identik.
 
-**Rocky-specific:** SELinux is enabled by default and blocks Caddy from
-connecting to `localhost:8080` unless told otherwise:
+**Khusus Rocky:** SELinux aktif secara bawaan dan memblokir Caddy untuk
+terhubung ke `localhost:8080` kecuali diizinkan:
 ```bash
 sudo setsebool -P httpd_can_network_connect 1
 ```
-Without this, requests through Caddy fail with a "Permission denied" that
-has nothing obviously to do with SELinux — if Caddy can't reach the API on
-Rocky, this is the first thing to check.
+Tanpa ini, request yang lewat Caddy gagal dengan pesan "Permission denied"
+yang sama sekali tidak terlihat berhubungan dengan SELinux — kalau Caddy
+tidak bisa menjangkau API di Rocky, ini hal pertama yang harus dicek.
 
-## Deploying an update
+## Melakukan deploy pembaruan
 
 ```bash
 cd /opt/app
 ./deploy/deploy.sh
 ```
-This pulls, backs up the current binaries, rebuilds, runs platform +
-tenant migrations, syncs permissions, and restarts the service. Expect
-1–2 seconds of downtime at the restart — schedule deploys outside business
-hours for apps with fixed operating hours (like POS).
+Script ini melakukan pull, membackup binary yang sedang berjalan,
+build ulang, menjalankan migrasi platform + tenant, menyinkronkan permission,
+lalu me-restart service. Perkirakan downtime 1–2 detik saat restart —
+jadwalkan deploy di luar jam operasional untuk aplikasi dengan jam kerja
+tetap (seperti POS).
 
 ### Rollback
 
@@ -69,19 +71,21 @@ hours for apps with fixed operating hours (like POS).
 cp api.backup api && sudo systemctl restart app-api
 ```
 
-## Backups
+## Backup
 
 ```bash
 sudo cp deploy/pg-backup.service deploy/pg-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now pg-backup.timer
 ```
-This runs `pg_dump` daily and keeps 35 days locally. **Copy backups off
-the server** (rsync/rclone to remote storage) — a backup on the same disk
-that fails doesn't protect you. Test a restore periodically; an untested
-backup is a guess, not a backup.
+Ini menjalankan `pg_dump` setiap hari dan menyimpan 35 hari terakhir secara
+lokal. **Salin backup ke luar server** (rsync/rclone ke penyimpanan remote) —
+backup yang berada di disk yang sama dengan disk yang rusak tidak melindungi
+apa pun. Uji proses restore secara berkala; backup yang tidak pernah diuji
+itu tebakan, bukan backup.
 
-## Environment variables
+## Environment variable
 
-See `.env.example` for the full list. All of them are readable/writable
-without a rebuild — edit `/etc/app/api.env` and `systemctl restart app-api`.
+Lihat `.env.example` untuk daftar lengkapnya. Semuanya bisa dibaca/diubah
+tanpa build ulang — edit `/etc/app/api.env` lalu jalankan
+`systemctl restart app-api`.

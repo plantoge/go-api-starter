@@ -1,12 +1,12 @@
-# Getting Started (Windows development)
+# Memulai (pengembangan di Windows)
 
-## 1. Install prerequisites
+## 1. Pasang prasyarat
 
 - Go 1.25+
-- PostgreSQL, running locally
-- `air` for hot reload: `go install github.com/air-verse/air@latest`
+- PostgreSQL, berjalan secara lokal
+- `air` untuk hot reload: `go install github.com/air-verse/air@latest`
 
-## 2. Create the databases
+## 2. Buat database
 
 ```powershell
 psql -U postgres -c "CREATE ROLE app LOGIN PASSWORD 'changeme';"
@@ -14,53 +14,54 @@ psql -U postgres -c "CREATE DATABASE appdb OWNER app;"
 psql -U postgres -c "CREATE DATABASE app_test OWNER app;"
 ```
 
-## 3. Configure environment
+## 3. Konfigurasi environment
 
 ```powershell
 copy .env.example .env
 copy .env.test.example .env.test
 ```
-Adjust `DB_PASSWORD` in both files if you used a different password above.
+Sesuaikan `DB_PASSWORD` di kedua file jika kamu memakai password yang
+berbeda dari perintah di atas.
 
-## 4. Run migrations and create your first admin
+## 4. Jalankan migrasi dan buat admin pertama
 
 ```powershell
 go run ./cmd/cli migrate platform up
 go run ./cmd/cli admin create --email=you@example.com --name="Your Name"
 ```
-Copy the printed password — it's shown once.
+Salin password yang tercetak — password itu hanya ditampilkan sekali.
 
-## 5. Create your first tenant
+## 5. Buat tenant pertama
 
 ```powershell
 go run ./cmd/cli tenant create --code=acme_corp --name="Acme Corp" --owner-email=owner@acme.test
 ```
-Copy the printed owner password too.
+Salin juga password owner yang tercetak.
 
-## 6. Run the API
+## 6. Jalankan API
 
 ```powershell
 air
 ```
-or without hot reload:
+atau tanpa hot reload:
 ```powershell
 go run ./cmd/api
 ```
 
-## 7. Try it
+## 7. Coba
 
 ```powershell
 curl http://localhost:8080/health
 curl -X POST http://localhost:8080/api/v1/auth/login -H "Content-Type: application/json" -d "{\"tenant_code\":\"acme_corp\",\"email\":\"owner@acme.test\",\"password\":\"<owner password>\"}"
 ```
 
-## Running tests
+## Menjalankan test
 
 ```powershell
 go test ./...
 ```
-Integration tests connect to `app_test` using `.env.test` and are skipped
-automatically if PostgreSQL isn't reachable. Before merging or deploying,
-run `REQUIRE_TEST_DB=1 go test ./...` — this fail-closed mode turns those
-skips into failures when a database should be available, catching bugs
-that only manifest against a real database.
+Integration test terhubung ke `app_test` menggunakan `.env.test` dan otomatis
+di-skip jika PostgreSQL tidak bisa dijangkau. Sebelum merge atau deploy,
+jalankan `REQUIRE_TEST_DB=1 go test ./...` — mode fail-closed ini mengubah
+skip tersebut menjadi kegagalan ketika database seharusnya tersedia,
+sehingga bug yang hanya muncul terhadap database sungguhan ikut tertangkap.
