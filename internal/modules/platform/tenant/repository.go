@@ -109,7 +109,10 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orderBy string
 }
 
 func (r *Repository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, suspendedAt *time.Time) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE tenants SET status = $2, suspended_at = $3 WHERE id = $1`, id, status, suspendedAt)
+	actor, _ := database.ActorFromContext(ctx)
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE tenants SET status = $2, suspended_at = $3, updated_by = $4 WHERE id = $1`,
+		id, status, suspendedAt, actor.UserID)
 	if err != nil {
 		return apperror.Internal(err)
 	}
@@ -117,7 +120,10 @@ func (r *Repository) UpdateStatus(ctx context.Context, id uuid.UUID, status stri
 }
 
 func (r *Repository) SoftDelete(ctx context.Context, id uuid.UUID) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE tenants SET deleted_at = now() WHERE id = $1`, id)
+	actor, _ := database.ActorFromContext(ctx)
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE tenants SET deleted_at = now(), deleted_by = $2 WHERE id = $1`,
+		id, actor.UserID)
 	if err != nil {
 		return apperror.Internal(err)
 	}

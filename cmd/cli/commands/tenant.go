@@ -5,12 +5,23 @@ import (
 	"flag"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"go-api-starter/internal/config"
 	"go-api-starter/internal/database"
 	"go-api-starter/internal/middleware"
 	platformtenant "go-api-starter/internal/modules/platform/tenant"
 	"go-api-starter/internal/pagination"
 )
+
+// cliContext returns a context carrying a fixed, recognizable sentinel
+// actor (all-zero UUID) for CLI-driven platform-tenant lifecycle
+// operations, so audit columns (created_by/updated_by/deleted_by) are
+// never left NULL just because the CLI has no logged-in user to attribute
+// the action to. See docs/database-conventions.md for this convention.
+func cliContext() context.Context {
+	return database.WithActor(context.Background(), database.Actor{UserID: uuid.Nil, Scope: "cli"})
+}
 
 func init() {
 	Register("tenant create", cmdTenantCreate)
@@ -64,7 +75,7 @@ func cmdTenantCreate(args []string) error {
 	}
 	defer cleanup()
 
-	result, err := svc.Provision(context.Background(), platformtenant.ProvisionInput{
+	result, err := svc.Provision(cliContext(), platformtenant.ProvisionInput{
 		Code: *code, Name: *name, OwnerEmail: *ownerEmail,
 	})
 	if err != nil {
@@ -124,7 +135,7 @@ func tenantStatusCommand(args []string, name string, action func(*platformtenant
 	}
 	defer cleanup()
 
-	if err := action(svc, context.Background(), *code); err != nil {
+	if err := action(svc, cliContext(), *code); err != nil {
 		return err
 	}
 	fmt.Println("ok")
@@ -153,7 +164,7 @@ func cmdTenantPurge(args []string) error {
 	}
 	defer cleanup()
 
-	if err := svc.Purge(context.Background(), *code); err != nil {
+	if err := svc.Purge(cliContext(), *code); err != nil {
 		return err
 	}
 	fmt.Println("tenant permanently purged")

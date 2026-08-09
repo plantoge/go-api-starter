@@ -20,6 +20,11 @@ deleted_by  UUID NULL
   ```
 - `*_by` columns are filled from `database.ActorFromContext(ctx)` in the
   repository layer, never left for the database to guess.
+- CLI-driven platform-tenant lifecycle operations (`cmd/cli/commands/tenant.go`)
+  have no logged-in user to attribute actions to, so they run with a fixed
+  sentinel actor (`database.Actor{UserID: uuid.Nil, Scope: "cli"}`) — if you
+  see `00000000-0000-0000-0000-000000000000` in a `*_by` column, it means
+  the action was taken via the CLI, not that the audit trail is broken.
 - IDs are `UUID PRIMARY KEY` with **no database default** — generate with
   `uuid.New()` in Go before inserting. (A `SET LOCAL search_path`
   transaction only searches the tenant's own schema, not `public`, so a

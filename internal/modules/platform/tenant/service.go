@@ -95,10 +95,11 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 	}
 	defer tx.Rollback()
 
+	actor, _ := database.ActorFromContext(ctx)
 	tenantID := uuid.New()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO platform.tenants (id, code, name, schema_name, status) VALUES ($1, $2, $3, $4, 'provisioning')`,
-		tenantID, code, in.Name, code); err != nil {
+		`INSERT INTO platform.tenants (id, code, name, schema_name, status, created_by) VALUES ($1, $2, $3, $4, 'provisioning', $5)`,
+		tenantID, code, in.Name, code, actor.UserID); err != nil {
 		// Only a genuine unique-constraint violation on tenants_code_key
 		// (SQLSTATE 23505) is a duplicate code; anything else is a real
 		// Internal error.
