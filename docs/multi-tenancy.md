@@ -10,7 +10,7 @@ tenant B's response. Breaking either one is a data breach, not a bug.
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (User, error) {
 	var u User
 	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
-		return tx.Get(&u, `SELECT * FROM users WHERE id = $1`, id)
+		return tx.Get(&u, `SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL`, id)
 	})
 	return u, err
 }

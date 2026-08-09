@@ -129,6 +129,17 @@ func Load() (*Config, error) {
 		},
 	}
 
+	// A short/weak JWT_SECRET is a real production risk, not just a style
+	// nit — anyone who can guess or brute-force it can forge access
+	// tokens for any user. .env.example ships a placeholder value that
+	// looks random but is publicly known (it's in version control); this
+	// check exists mainly to catch a deploy that copied .env.example
+	// verbatim without ever editing it, rather than to enforce true
+	// entropy (which a length check can't measure anyway).
+	if cfg.JWT.Secret != "" && len(cfg.JWT.Secret) < 32 {
+		errs = append(errs, "JWT_SECRET must be at least 32 characters")
+	}
+
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
 	}

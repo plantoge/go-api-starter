@@ -34,7 +34,11 @@ type TenantInfo struct {
 
 type Actor struct {
 	UserID uuid.UUID
-	Scope  string // "platform" | "tenant"
+	// Scope is "platform" | "tenant" for an HTTP-authenticated caller, or
+	// "cli" for the fixed sentinel actor (UserID: uuid.Nil) CLI commands
+	// use to populate *_by audit columns on operations that have no real
+	// logged-in user (see cmd/cli/commands/tenant.go, admin.go).
+	Scope string
 }
 
 type tenantCtxKey struct{}

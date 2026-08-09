@@ -7,12 +7,23 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strconv"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 )
+
+// requireTestDB reports whether REQUIRE_TEST_DB is set to a truthy value.
+// A plain os.Getenv(...) != "" check would treat REQUIRE_TEST_DB=0 or
+// REQUIRE_TEST_DB=false as "set" (fail-closed) too, which is surprising —
+// strconv.ParseBool gives the usual off-switch values (0/false/f/...) their
+// expected meaning, and anything unparseable (including unset) is off.
+func requireTestDB() bool {
+	b, _ := strconv.ParseBool(os.Getenv("REQUIRE_TEST_DB"))
+	return b
+}
 
 // TestDSN returns the connection string OpenTestDB would use to connect,
 // without actually connecting — for callers (like migration.MigrateTenantUp)
@@ -40,7 +51,7 @@ func OpenTestDB(t *testing.T) *sqlx.DB {
 
 	db, err := sqlx.Connect("pgx", dsn)
 	if err != nil {
-		if os.Getenv("REQUIRE_TEST_DB") != "" {
+		if requireTestDB() {
 			t.Fatalf("REQUIRE_TEST_DB is set but no local PostgreSQL test database reachable: %v", err)
 		}
 		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
@@ -55,19 +66,11 @@ func OpenTestDB(t *testing.T) *sqlx.DB {
 // it assumes a platform-pinned connection.
 func OpenTestPlatformDB(t *testing.T) *sqlx.DB {
 	t.Helper()
-	_ = godotenv.Load(findEnvTestFile())
+	dsn := TestDSN() + "&search_path=platform"
 
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&search_path=platform",
-		getenv("DB_USER", "app"),
-		getenv("DB_PASSWORD", "changeme"),
-		getenv("DB_HOST", "localhost"),
-		getenv("DB_PORT", "5432"),
-		getenv("DB_NAME", "app_test"),
-		getenv("DB_SSLMODE", "disable"),
-	)
 	db, err := sqlx.Connect("pgx", dsn)
 	if err != nil {
-		if os.Getenv("REQUIRE_TEST_DB") != "" {
+		if requireTestDB() {
 			t.Fatalf("REQUIRE_TEST_DB is set but no local PostgreSQL test database reachable: %v", err)
 		}
 		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)

@@ -6,7 +6,13 @@ consequence — usually data leaking across tenants — not just a style nit.
 ## Multi-tenancy (see `docs/multi-tenancy.md` for the full explanation)
 
 - **Every tenant data query goes through `database.WithTenant(ctx, fn)`.**
-  No repository holds a bare `*sqlx.DB` for tenant tables. No exceptions.
+  No repository holds a bare `*sqlx.DB` for tenant tables. The only
+  exceptions are CLI/DDL paths that need one transaction spanning schema
+  creation itself — something `WithTenant` can't express, since the schema
+  doesn't exist yet when the transaction starts (`platform/tenant`
+  provisioning/purge, `permission.Sync`, `cli cleanup`). Every one of these
+  must call `database.ValidSchemaName` before interpolating a schema name
+  into SQL, the same defense-in-depth `WithTenant` itself uses.
 - **`*fiber.Ctx` never leaves the handler layer.** Services and
   repositories take `context.Context` only. Fiber is built on `fasthttp`,
   which reuses request objects across requests — anything that escapes the

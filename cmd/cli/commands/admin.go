@@ -50,9 +50,12 @@ func cmdAdminCreate(args []string) error {
 		return err
 	}
 
+	// Bootstrap has no prior admin to be an actor, so this uses the same
+	// fixed CLI sentinel (uuid.Nil, scope "cli") as the other CLI commands
+	// that mutate audit-column-bearing rows — see database.Actor.Scope.
 	_, err = pool.Exec(
-		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, $2, $3, $4, true)`,
-		uuid.New(), *email, hash, *name)
+		`INSERT INTO users (id, email, password_hash, name, is_active, created_by) VALUES ($1, $2, $3, $4, true, $5)`,
+		uuid.New(), *email, hash, *name, uuid.Nil)
 	if err != nil {
 		return fmt.Errorf("insert admin user: %w", err)
 	}

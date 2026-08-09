@@ -30,11 +30,15 @@ func main() {
 
 // splitCommand takes the leading non-flag arguments as the command name
 // (e.g. "migrate tenant up") and returns the rest as flags, so callers can
-// run `cli migrate tenant up --tenant=acme_corp`.
+// run `cli migrate tenant up --tenant=acme_corp`. Checks for a single "-"
+// prefix, not just "--" — Go's flag package accepts both forms
+// (`-all`/`--all`), so a single-dash flag must stop the command-name scan
+// the same way a double-dash one does, or it gets swallowed into the
+// command key and reported as "unknown command".
 func splitCommand(args []string) (cmdKey string, rest []string) {
 	var parts []string
 	i := 0
-	for i < len(args) && !strings.HasPrefix(args[i], "--") {
+	for i < len(args) && !strings.HasPrefix(args[i], "-") {
 		parts = append(parts, args[i])
 		i++
 	}

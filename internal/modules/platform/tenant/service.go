@@ -164,8 +164,8 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 		return ProvisionResult{}, apperror.Internal(err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO users (id, email, password_hash, name, is_active) VALUES ($1, $2, $3, 'Owner', true)`,
-		ownerID, in.OwnerEmail, ownerHash); err != nil {
+		`INSERT INTO users (id, email, password_hash, name, is_active, created_by) VALUES ($1, $2, $3, 'Owner', true, $4)`,
+		ownerID, in.OwnerEmail, ownerHash, actor.UserID); err != nil {
 		return ProvisionResult{}, apperror.Internal(err)
 	}
 	if _, err := tx.ExecContext(ctx,

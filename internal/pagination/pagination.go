@@ -59,9 +59,24 @@ func (p Params) Offset() int {
 // OrderByClause returns "<column> ASC|DESC" using ONLY the whitelisted SQL
 // column name from sortable[p.Sort] — never the raw p.Sort value itself —
 // so it is always safe to append directly to a query string.
+//
+// Parse already rejects an unknown sort/order before a Params ever reaches
+// here, but a Params built by hand (bypassing Parse — e.g. a CLI command
+// constructing one directly) has no such guarantee. A missing key used to
+// silently produce a broken "ORDER BY  DESC" — a SQL syntax error, not an
+// injection risk, but an opaque one. col falls back to the ordinal
+// position "1" (always valid regardless of which columns exist); order
+// falls back to DESC.
 func (p Params) OrderByClause(sortable map[string]string) string {
-	col := sortable[p.Sort]
-	return col + " " + strings.ToUpper(p.Order)
+	col, ok := sortable[p.Sort]
+	if !ok {
+		col = "1"
+	}
+	order := strings.ToUpper(p.Order)
+	if order != "ASC" && order != "DESC" {
+		order = "DESC"
+	}
+	return col + " " + order
 }
 
 func BuildMeta(page, limit, total int) response.Meta {

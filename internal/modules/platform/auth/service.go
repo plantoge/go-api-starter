@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -70,7 +71,13 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 	passwordOK := appauth.VerifyPassword(hashToCheck, req.Password)
 	valid := found && passwordOK
 
-	s.rateLimiter.Record(ctx, appauth.ScopePlatform, nil, req.Email, valid)
+	// If recording the attempt itself fails, brute-force protection
+	// degrades silently for this email/scope unless we log it — the login
+	// still resolves correctly either way, only the rate-limit counter
+	// might undercount.
+	if err := s.rateLimiter.Record(ctx, appauth.ScopePlatform, nil, req.Email, valid); err != nil {
+		slog.Error("rate limiter record failed", "scope", appauth.ScopePlatform, "error", err)
+	}
 	if !valid {
 		return LoginResponse{}, apperror.Unauthorized("email atau password salah")
 	}

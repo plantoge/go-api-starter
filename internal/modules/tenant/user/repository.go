@@ -68,7 +68,13 @@ func (r *Repository) Create(ctx context.Context, u User) error {
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return apperror.Conflict("email sudah dipakai")
 		}
-		return apperror.Internal(fmt.Errorf("insert user: %w", err))
+		// If WithTenant itself failed (e.g. missing tenant context, invalid
+		// schema name), it already returns a classified *apperror.Error —
+		// wrapDBErr passes that through unchanged instead of double-wrapping
+		// it in another apperror.Internal, which would erase the original
+		// classification (e.g. turning a caller-error Internal into a
+		// second, less specific Internal).
+		return wrapDBErr(fmt.Errorf("insert user: %w", err))
 	}
 	return nil
 }

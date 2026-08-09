@@ -38,12 +38,15 @@ func NewRouter(deps Dependencies, corsOrigins []string) *fiber.App {
 		},
 	})
 
-	app.Get("/swagger/*", swaggerui.HandlerDefault)
-
 	app.Use(middleware.RequestID())
 	app.Use(middleware.Logger(nil))
 	app.Use(middleware.Recover())
 	app.Use(middleware.CORS(corsOrigins))
+
+	// Registered after the middleware chain (not before, as in the
+	// original version) so panic recovery and structured logging apply to
+	// it like every other route, instead of being silently bypassed.
+	app.Get("/swagger/*", swaggerui.HandlerDefault)
 
 	api := app.Group("/api/v1")
 
