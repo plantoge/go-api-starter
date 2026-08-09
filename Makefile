@@ -13,7 +13,7 @@ test:
 	go test ./... -short
 
 test-integration:
-	go test ./... -run Integration -v
+	REQUIRE_TEST_DB=1 go test ./... -v
 
 migrate-platform:
 	go run ./cmd/cli migrate platform up
