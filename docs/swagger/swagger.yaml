@@ -404,4 +404,9 @@ paths:
       summary: Update a tenant user
       tags:
       - users
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
 swagger: "2.0"

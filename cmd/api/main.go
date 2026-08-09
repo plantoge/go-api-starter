@@ -2,6 +2,9 @@
 // @version         1.0
 // @description     Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.
 // @BasePath        /api/v1
+// @securitydefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
 package main
 
 import (
