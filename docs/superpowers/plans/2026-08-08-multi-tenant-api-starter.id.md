@@ -8603,11 +8603,28 @@ go get github.com/swaggo/swag
 - [ ] **Langkah 2: Tambah anotasi API umum ke `main.go`**
 
 Ubah `cmd/api/main.go` — tambahkan blok komentar ini tepat di atas `package main`:
+
+**Amandemen (ditambahkan saat eksekusi Tugas 22):** blok di bawah ini
+awalnya kehilangan anotasi `@securitydefinitions.apikey`. Lima endpoint
+(Tugas 22 Langkah 5, handler `users` tenant) membawa `@Security
+BearerAuth`, tapi tanpa deklarasi `securityDefinitions` yang cocok di
+suatu tempat pada source yang dianotasi, `swag init` menghasilkan dokumen
+Swagger 2.0 yang merujuk skema keamanan yang tidak terdefinisi — tidak
+valid menurut spec, dan pada praktiknya tombol "Authorize" pada Swagger UI
+yang dihasilkan tidak akan pernah muncul, sehingga route yang terproteksi
+tidak bisa dicoba secara interaktif dari `/swagger/index.html`. Tiga baris
+di bawah (`@securitydefinitions.apikey`, `@in`, `@name`) adalah pola
+swaggo standar untuk API berbasis bearer-token dan seharusnya berada di
+blok anotasi umum yang sama dengan `@title`/`@version`/`@BasePath`.
+
 ```go
 // @title           App API
 // @version         1.0
 // @description     Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.
 // @BasePath        /api/v1
+// @securitydefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
 package main
 ```
 

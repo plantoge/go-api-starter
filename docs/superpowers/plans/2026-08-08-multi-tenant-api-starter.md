@@ -8569,11 +8569,27 @@ go get github.com/swaggo/swag
 - [ ] **Step 2: Add general API annotations to `main.go`**
 
 Modify `cmd/api/main.go` — add this comment block immediately above `package main`:
+
+**Amendment (added during Task 22 execution):** the original block below
+was missing the `@securitydefinitions.apikey` annotation. Five endpoints
+(Task 22 Step 5, the tenant `users` handlers) carry `@Security BearerAuth`,
+but without a matching `securityDefinitions` declaration somewhere in the
+annotated source, `swag init` emits a Swagger 2.0 document that references
+an undefined security scheme — invalid per spec, and in practice the
+generated Swagger UI's "Authorize" button never appears, so protected
+routes can't be exercised interactively from `/swagger/index.html`. The
+three lines below (`@securitydefinitions.apikey`, `@in`, `@name`) are the
+standard swaggo pattern for a bearer-token API and belong on the same
+general-annotation block as `@title`/`@version`/`@BasePath`.
+
 ```go
 // @title           App API
 // @version         1.0
 // @description     Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.
 // @BasePath        /api/v1
+// @securitydefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
 package main
 ```
 
