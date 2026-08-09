@@ -33,6 +33,9 @@ func OpenTestDB(t *testing.T) *sqlx.DB {
 
 	db, err := sqlx.Connect("pgx", dsn)
 	if err != nil {
+		if os.Getenv("REQUIRE_TEST_DB") != "" {
+			t.Fatalf("REQUIRE_TEST_DB is set but no local PostgreSQL test database reachable: %v", err)
+		}
 		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
 	}
 	t.Cleanup(func() { db.Close() })
@@ -57,6 +60,9 @@ func OpenTestPlatformDB(t *testing.T) *sqlx.DB {
 	)
 	db, err := sqlx.Connect("pgx", dsn)
 	if err != nil {
+		if os.Getenv("REQUIRE_TEST_DB") != "" {
+			t.Fatalf("REQUIRE_TEST_DB is set but no local PostgreSQL test database reachable: %v", err)
+		}
 		t.Skipf("skipping: no local PostgreSQL test database reachable (%v)", err)
 	}
 	t.Cleanup(func() { db.Close() })

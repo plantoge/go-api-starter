@@ -60,4 +60,7 @@ curl -X POST http://localhost:8080/api/v1/auth/login -H "Content-Type: applicati
 go test ./...
 ```
 Integration tests connect to `app_test` using `.env.test` and are skipped
-automatically if PostgreSQL isn't reachable.
+automatically if PostgreSQL isn't reachable. Before merging or deploying,
+run `REQUIRE_TEST_DB=1 go test ./...` — this fail-closed mode turns those
+skips into failures when a database should be available, catching bugs
+that only manifest against a real database.
