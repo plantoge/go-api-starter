@@ -3,6 +3,23 @@
 **Tanggal:** 2026-08-06 (revisi 2026-08-07)
 **Status:** Disetujui
 
+> **Catatan arsip.** Berkas ini adalah arsip keputusan bertanggal dan
+> sengaja tidak diperbarui mengikuti kode. Bila isinya berbeda dengan
+> dokumen di `docs/`, **`docs/` yang berlaku.** Perbedaan yang sudah
+> diketahui sampai 2026-08-12:
+>
+> 1. **Kolom `*_by` untuk pelaku non-user** — spec menetapkan `NULL`;
+>    implementasinya memakai actor sentinel `uuid.Nil`. Lihat
+>    `docs/database-conventions.md`.
+> 2. **`internal/shared/` dan `querybuilder`** — tidak dibangun. Paket
+>    pendukung berada rata di `internal/response`, `internal/apperror`,
+>    `internal/validator`, `internal/pagination`, dan filter soft delete
+>    ditulis manual di tiap query, bukan dipaksakan helper.
+> 3. **`modules/platform/user`** — tidak dibangun; admin platform hanya
+>    dibuat lewat `cli admin create`. `modules/platform/tenant` juga tanpa
+>    `handler.go`, karena endpoint admin self-service masih "Di Luar
+>    Cakupan".
+
 ## Ringkasan
 
 Backend API Golang yang melayani banyak client (tenant) dari satu deployment, dengan
