@@ -99,6 +99,42 @@ func TestError_UnknownError_Becomes500WithoutLeakingDetail(t *testing.T) {
 	}
 }
 
+func TestError_RouteNotFound_Returns404NotInternalError(t *testing.T) {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return Error(c, "req-404", err)
+		},
+	})
+	app.Get("/x", func(c *fiber.Ctx) error {
+		return Success(c, 200, nil)
+	})
+
+	// Hit a path with no registered route, so fiber itself raises
+	// *fiber.Error{Code: 404} before this handler ever runs.
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/does-not-exist", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+	var body struct {
+		Success bool `json:"success"`
+		Error   struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Success {
+		t.Error("success = true, want false")
+	}
+	if body.Error.Code != "NOT_FOUND" {
+		t.Errorf("error.code = %q, want NOT_FOUND", body.Error.Code)
+	}
+}
+
 func TestError_Internal_LogsCauseServerSide(t *testing.T) {
 	// Capture slog output
 	buf := &bytes.Buffer{}

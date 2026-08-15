@@ -59,6 +59,25 @@ func Error(c *fiber.Ctx, requestID string, err error) error {
 		})
 	}
 
+	// Fiber raises *fiber.Error for routing failures (no matching route,
+	// method not allowed) before a handler ever runs, so these never pass
+	// through a service and never become *apperror.Error. Render them with
+	// their real status instead of falling through to the 500 branch below
+	// — a plain "not found" shouldn't be logged and reported as an
+	// unexpected server bug.
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusNotFound {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error": fiber.Map{
+				"code":    apperror.CodeNotFound,
+				"message": "rute tidak ditemukan",
+				"details": fiber.Map{},
+			},
+			"request_id": requestID,
+		})
+	}
+
 	slog.Error("unhandled error", "request_id", requestID, "error", err)
 	return c.Status(500).JSON(fiber.Map{
 		"success": false,

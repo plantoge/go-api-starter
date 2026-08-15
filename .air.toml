@@ -1,0 +1,26 @@
+#:schema https://json.schemastore.org/any.json
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # air's own default build.cmd is "go build -o ./tmp/main ." — that
+  # assumes main package lives at the project root. This project's main
+  # package is under ./cmd/api instead, so the default build fails with
+  # "no Go files in <root>" and then tries to run a binary that was never
+  # produced. Point both at ./cmd/api explicitly.
+  cmd = "go build -o ./tmp/main ./cmd/api"
+  bin = "./tmp/main"
+  entrypoint = ["./tmp/main"]
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "docs", "graphify-out"]
+  exclude_regex = ["_test.go"]
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  delay = 1000
+
+  [build.windows]
+    cmd = "go build -o ./tmp/main.exe ./cmd/api"
+    bin = "tmp\\main.exe"
+    entrypoint = ["tmp\\main.exe"]
+
+[log]
+  time = true
