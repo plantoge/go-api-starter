@@ -13,9 +13,9 @@ import (
 	"go-api-starter/internal/database"
 )
 
-// PermissionChecker is implemented by the tenant role service
-// (modules/tenant/role, this task). Declared here, consumer-side, so this
-// package never imports modules/tenant/role.
+// PermissionChecker diimplementasikan oleh service role tenant
+// (modules/tenant/role, task ini). Dideklarasikan di sini, di sisi
+// pemakai, biar package ini nggak perlu meng-import modules/tenant/role.
 type PermissionChecker interface {
 	HasPermission(ctx context.Context, userID uuid.UUID, permCode string) (bool, error)
 }
@@ -31,10 +31,10 @@ type permCacheEntry struct {
 	expires time.Time
 }
 
-// PermissionCache wraps a PermissionChecker with a short TTL cache keyed
-// by (tenant, user, permission) — same "asumsi single instance" caveat as
-// TenantResolver (Task 11): a revoked permission is only guaranteed to
-// take effect on this instance after ttl elapses.
+// PermissionCache ngebungkus PermissionChecker pakai cache ber-TTL pendek
+// dengan kunci (tenant, user, permission). Catatan "asumsi single
+// instance"-nya sama persis kayak TenantResolver (Task 11): permission
+// yang dicabut baru dijamin berlaku di instance ini setelah ttl habis.
 type PermissionCache struct {
 	checker PermissionChecker
 	ttl     time.Duration
@@ -67,9 +67,10 @@ func (c *PermissionCache) HasPermission(ctx context.Context, tenantID, userID uu
 	return allowed, nil
 }
 
-// RequirePermission rejects the request unless the authenticated tenant
-// user holds permCode. It must run after RequireTenant — it reads the
-// tenant and actor info that only RequireTenant sets in the context.
+// RequirePermission nolak request kecuali user tenant yang sudah login
+// memang punya permCode. Wajib jalan setelah RequireTenant, soalnya dia
+// baca info tenant dan pelaku yang cuma diisi sama RequireTenant di
+// context.
 func RequirePermission(permCode string, cache *PermissionCache) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		actor, ok := database.ActorFromContext(c.UserContext())
@@ -78,7 +79,7 @@ func RequirePermission(permCode string, cache *PermissionCache) fiber.Handler {
 		}
 		tenant, ok := database.TenantFromContext(c.UserContext())
 		if !ok {
-			return apperror.Internal(fmt.Errorf("RequirePermission used without RequireTenant"))
+			return apperror.Internal(fmt.Errorf("RequirePermission dipakai tanpa RequireTenant"))
 		}
 
 		allowed, err := cache.HasPermission(c.UserContext(), tenant.TenantID, actor.UserID, permCode)

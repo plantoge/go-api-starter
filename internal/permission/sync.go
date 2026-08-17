@@ -12,15 +12,17 @@ import (
 	"go-api-starter/internal/database"
 )
 
-// Sync inserts any permission in All that schemaName's permissions table
-// doesn't already have, and reports how many were added. Idempotent — safe
-// to run against every tenant on every deploy — because permission
-// constants live in Go code, not in migration files, so a newly added
-// constant needs an explicit push to reach tenants provisioned before it
-// existed.
+// Sync nyisipin permission dari All yang belum ada di tabel permissions
+// milik schemaName, lalu ngasih tahu berapa yang berhasil ditambah. Aman
+// dijalankan berulang — boleh dipanggil ke semua tenant tiap kali deploy.
+//
+// Fungsi ini perlu ada karena konstanta permission hidup di kode Go, bukan
+// di file migrasi. Jadi konstanta yang baru ditambah butuh dorongan
+// eksplisit supaya sampai juga ke tenant yang dibuat sebelum konstanta itu
+// ada.
 func Sync(ctx context.Context, db *sql.DB, schemaName string) (added int, err error) {
 	if !database.ValidSchemaName(schemaName) {
-		return 0, apperror.Internal(fmt.Errorf("invalid schema name %q", schemaName))
+		return 0, apperror.Internal(fmt.Errorf("nama schema tidak valid: %q", schemaName))
 	}
 
 	tx, err := db.BeginTx(ctx, nil)

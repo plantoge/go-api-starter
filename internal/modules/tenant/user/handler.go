@@ -20,12 +20,12 @@ func NewHandler(svc *Service) *Handler {
 }
 
 // Create godoc
-// @Summary      Create a tenant user
+// @Summary      Buat user tenant
 // @Tags         users
 // @Security     BearerAuth
 // @Accept       json
 // @Produce      json
-// @Param        body body CreateRequest true "new user"
+// @Param        body body CreateRequest true "data user baru"
 // @Success      201 {object} View
 // @Failure      422 {object} map[string]any
 // @Router       /users [post]
@@ -47,11 +47,11 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 }
 
 // Get godoc
-// @Summary      Get a tenant user by ID
+// @Summary      Ambil satu user tenant berdasarkan ID
 // @Tags         users
 // @Security     BearerAuth
 // @Produce      json
-// @Param        id path string true "user id"
+// @Param        id path string true "id user"
 // @Success      200 {object} View
 // @Failure      404 {object} map[string]any
 // @Router       /users/{id} [get]
@@ -69,14 +69,14 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 }
 
 // List godoc
-// @Summary      List tenant users
+// @Summary      Daftar user tenant
 // @Tags         users
 // @Security     BearerAuth
 // @Produce      json
-// @Param        page query int false "page number"
-// @Param        limit query int false "page size, max 100"
-// @Param        sort query string false "created_at, name, or email"
-// @Param        order query string false "asc or desc"
+// @Param        page query int false "nomor halaman"
+// @Param        limit query int false "jumlah data per halaman, maksimal 100"
+// @Param        sort query string false "created_at, name, atau email"
+// @Param        order query string false "asc atau desc"
 // @Success      200 {object} map[string]any
 // @Router       /users [get]
 func (h *Handler) List(c *fiber.Ctx) error {
@@ -93,13 +93,13 @@ func (h *Handler) List(c *fiber.Ctx) error {
 }
 
 // Update godoc
-// @Summary      Update a tenant user
+// @Summary      Perbarui user tenant
 // @Tags         users
 // @Security     BearerAuth
 // @Accept       json
 // @Produce      json
-// @Param        id path string true "user id"
-// @Param        body body UpdateRequest true "fields to change"
+// @Param        id path string true "id user"
+// @Param        body body UpdateRequest true "field yang mau diubah"
 // @Success      200 {object} map[string]any
 // @Failure      404 {object} map[string]any
 // @Router       /users/{id} [patch]
@@ -122,11 +122,11 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 }
 
 // Delete godoc
-// @Summary      Soft-delete a tenant user
+// @Summary      Hapus user tenant (soft delete)
 // @Tags         users
 // @Security     BearerAuth
 // @Produce      json
-// @Param        id path string true "user id"
+// @Param        id path string true "id user"
 // @Success      200 {object} map[string]any
 // @Failure      404 {object} map[string]any
 // @Router       /users/{id} [delete]

@@ -5,11 +5,11 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// RegisterHealth attaches liveness and readiness endpoints. /health never
-// touches the database — it only proves the process is alive and
-// responding. /health/ready additionally pings the database, so a load
-// balancer or orchestrator can tell "running" apart from "actually able to
-// serve requests."
+// RegisterHealth nempelin endpoint liveness dan readiness. /health sama
+// sekali nggak nyentuh database — cuma buktiin prosesnya hidup dan mau
+// menjawab. /health/ready sekalian nge-ping database, jadi load balancer
+// atau orchestrator bisa bedain "prosesnya jalan" sama "beneran siap
+// melayani request".
 func RegisterHealth(app *fiber.App, pool *sqlx.DB) {
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok"})

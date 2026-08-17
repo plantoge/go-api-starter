@@ -10,10 +10,10 @@ import (
 
 const localsKeyRequestID = "request_id"
 
-// RequestID assigns a ULID to every request (sortable by time, unique
-// without coordination) and exposes it via the X-Request-ID response
-// header and RequestIDFromCtx — the id every error response and log line
-// ties back to.
+// RequestID ngasih ULID ke tiap request (bisa diurutkan berdasarkan waktu,
+// dan unik tanpa perlu koordinasi), lalu nampilin lewat header respons
+// X-Request-ID dan RequestIDFromCtx. Id inilah yang jadi penghubung tiap
+// respons error dengan baris lognya.
 func RequestID() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var idStr string

@@ -71,10 +71,10 @@ func TestLoad_MissingRequired(t *testing.T) {
 	}
 }
 
-// Error() must stay on one line: slog quotes any attribute value
-// containing a newline, which would print "\n" literally instead of
-// breaking the line. Multiline() is the terminal-facing form and is the
-// only one allowed to contain newlines.
+// Error() wajib tetap satu baris: slog ngasih tanda kutip ke nilai atribut
+// yang mengandung baris baru, jadi "\n"-nya bakal tercetak apa adanya,
+// bukan ganti baris beneran. Multiline() yang versi buat terminal, dan
+// cuma dia yang boleh mengandung baris baru.
 func TestValidationError_Rendering(t *testing.T) {
 	ve := &ValidationError{Problems: []string{"DB_HOST wajib diisi", "JWT_SECRET minimal 32 karakter"}}
 

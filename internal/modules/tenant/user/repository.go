@@ -14,9 +14,10 @@ import (
 	"go-api-starter/internal/database"
 )
 
-// Sortable is the whitelist of columns the list endpoint may sort by,
-// consumed through pagination.Params.OrderByClause — never the raw query
-// value. Copy this pattern for every new tenant-scoped module.
+// Sortable whitelist kolom yang boleh dipakai endpoint list buat
+// mengurutkan data, dan dibaca lewat pagination.Params.OrderByClause —
+// bukan dari nilai query mentah. Tiru pola ini di tiap modul ber-scope
+// tenant yang baru.
 var Sortable = map[string]string{
 	"created_at": "created_at",
 	"name":       "name",
@@ -45,16 +46,18 @@ func wrapDBErr(err error) error {
 	return apperror.Internal(err)
 }
 
-// Amendment (added during Task 17 execution): the original version of
-// this function collapsed every INSERT failure into "email sudah dipakai"
-// — the same misclassification bug Task 14's review found and fixed for
-// tenant provisioning (a missing table, a lost connection, or any other
-// real failure would have been misreported as a duplicate email, hiding
-// the actual cause). Because this module is the copy-paste template every
-// future tenant-scoped module is built from, fixing the pattern here
-// (rather than letting it ship and get copied forward) matters more than
-// in an isolated module — this is checked via the same actual-Postgres-
-// error-code technique Task 14 uses, not a broadened assumption.
+// Catatan perbaikan (dibuat saat Task 17 dikerjakan): versi awal fungsi
+// ini nganggep semua kegagalan INSERT sebagai "email sudah dipakai" —
+// persis bug salah klasifikasi yang ketemu dan dibenerin di review Task 14
+// buat penyiapan tenant. Akibatnya tabel yang hilang, koneksi yang putus,
+// atau kegagalan nyata apa pun bakal dilaporin sebagai email duplikat, dan
+// penyebab aslinya ketutup.
+//
+// Modul ini template yang bakal disalin ke tiap modul ber-scope tenant di
+// masa depan, jadi benerin polanya di sini — daripada dibiarkan lolos lalu
+// ikut tersalin ke mana-mana — jauh lebih penting ketimbang di modul yang
+// berdiri sendiri. Pengecekannya pakai teknik yang sama dengan Task 14,
+// yaitu baca kode error asli dari Postgres, bukan main asumsi.
 func (r *Repository) Create(ctx context.Context, u User) error {
 	actor, _ := database.ActorFromContext(ctx)
 	err := r.db.WithTenant(ctx, func(tx *sqlx.Tx) error {
@@ -68,13 +71,12 @@ func (r *Repository) Create(ctx context.Context, u User) error {
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return apperror.Conflict("email sudah dipakai")
 		}
-		// If WithTenant itself failed (e.g. missing tenant context, invalid
-		// schema name), it already returns a classified *apperror.Error —
-		// wrapDBErr passes that through unchanged instead of double-wrapping
-		// it in another apperror.Internal, which would erase the original
-		// classification (e.g. turning a caller-error Internal into a
-		// second, less specific Internal).
-		return wrapDBErr(fmt.Errorf("insert user: %w", err))
+		// Kalau yang gagal justru WithTenant-nya (misal context tenant nggak
+		// ada, atau nama schema-nya nggak valid), dia sudah ngasih
+		// *apperror.Error yang terklasifikasi. wrapDBErr ngelewatin itu apa
+		// adanya, nggak dibungkus lagi jadi apperror.Internal kedua — soalnya
+		// pembungkusan ganda malah ngehapus klasifikasi aslinya.
+		return wrapDBErr(fmt.Errorf("gagal menyimpan user: %w", err))
 	}
 	return nil
 }

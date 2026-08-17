@@ -8,10 +8,10 @@ import (
 	"go-api-starter/internal/apperror"
 )
 
-// Recover converts a panic anywhere downstream into a normal
-// apperror.Internal error instead of crashing the process, logging the
-// stack trace server-side. The client only ever sees request_id —
-// response.Error never exposes panic detail.
+// Recover ngubah panic yang muncul di mana pun setelahnya jadi error
+// apperror.Internal biasa, jadi prosesnya nggak ikut mati, sambil nyimpen
+// stack trace-nya di log server. Klien cuma dapat request_id —
+// response.Error nggak pernah ngasih bocoran isi panic-nya.
 func Recover() fiber.Handler {
 	return func(c *fiber.Ctx) (err error) {
 		defer func() {

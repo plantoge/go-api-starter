@@ -67,7 +67,7 @@ func TestVerify_RejectsTokenSignedWithDifferentSecret(t *testing.T) {
 }
 
 func TestVerify_RejectsExpiredToken(t *testing.T) {
-	tm := NewTokenManager("test-secret", -1*time.Minute) // already expired
+	tm := NewTokenManager("test-secret", -1*time.Minute) // sudah kadaluarsa sejak awal
 	token, err := tm.IssueAccessToken(uuid.New(), ScopePlatform, nil)
 	if err != nil {
 		t.Fatalf("IssueAccessToken: %v", err)

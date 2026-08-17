@@ -33,9 +33,9 @@ func setupRoleService(t *testing.T) (*role.Service, database.TenantInfo, *sqlx.D
 	return role.NewService(database.NewDB(pool)), tenantInfo, pool
 }
 
-// seedInSchema runs a fixture-setup query with search_path pinned to
-// schema — tests seed rows directly rather than going through
-// database.WithTenant themselves.
+// seedInSchema jalanin query penyiapan data uji dengan search_path dikunci
+// ke schema tertentu — test-nya nyisipin baris langsung, nggak lewat
+// database.WithTenant.
 func seedInSchema(t *testing.T, pool *sqlx.DB, schema, query string, args ...any) {
 	t.Helper()
 	tx, err := pool.Begin()

@@ -23,20 +23,20 @@ func cmdCleanup(args []string) error {
 	}
 	db, err := openRawDB(cfg.DB.DSN())
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return fmt.Errorf("gagal terhubung ke database: %w", err)
 	}
 	defer db.Close()
 
 	if _, err := db.Exec(`DELETE FROM platform.refresh_tokens WHERE revoked_at IS NOT NULL OR expires_at < now()`); err != nil {
-		return fmt.Errorf("clean platform refresh_tokens: %w", err)
+		return fmt.Errorf("gagal membersihkan refresh_tokens platform: %w", err)
 	}
 	cutoff := time.Now().Add(-loginAttemptRetention)
 	if _, err := db.Exec(`DELETE FROM platform.login_attempts WHERE attempted_at < $1`, cutoff); err != nil {
-		return fmt.Errorf("clean platform login_attempts: %w", err)
+		return fmt.Errorf("gagal membersihkan login_attempts platform: %w", err)
 	}
-	fmt.Println("platform: cleaned")
+	fmt.Println("platform: sudah dibersihkan")
 
-	targets, err := tenantSchemasToMigrate(db, true, "") // shared helper from migrate.go
+	targets, err := tenantSchemasToMigrate(db, true, "") // helper bareng dari migrate.go
 	if err != nil {
 		return err
 	}
@@ -44,14 +44,14 @@ func cmdCleanup(args []string) error {
 		if err := cleanupTenantSchema(db, tgt.schemaName); err != nil {
 			return fmt.Errorf("tenant %s: %w", tgt.code, err)
 		}
-		fmt.Printf("%-20s cleaned\n", tgt.code)
+		fmt.Printf("%-20s sudah dibersihkan\n", tgt.code)
 	}
 	return nil
 }
 
 func cleanupTenantSchema(db *sql.DB, schemaName string) error {
 	if !database.ValidSchemaName(schemaName) {
-		return fmt.Errorf("invalid schema name %q", schemaName)
+		return fmt.Errorf("nama schema tidak valid: %q", schemaName)
 	}
 
 	tx, err := db.BeginTx(context.Background(), nil)

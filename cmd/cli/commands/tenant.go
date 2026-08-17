@@ -14,11 +14,11 @@ import (
 	"go-api-starter/internal/pagination"
 )
 
-// cliContext returns a context carrying a fixed, recognizable sentinel
-// actor (all-zero UUID) for CLI-driven platform-tenant lifecycle
-// operations, so audit columns (created_by/updated_by/deleted_by) are
-// never left NULL just because the CLI has no logged-in user to attribute
-// the action to. See docs/database-conventions.md for this convention.
+// cliContext bikin context yang bawa penanda pelaku tetap dan gampang
+// dikenali (UUID serba nol), dipakai buat operasi lifecycle tenant lewat
+// CLI. Gunanya biar kolom audit (created_by/updated_by/deleted_by) nggak
+// kosong cuma gara-gara CLI memang nggak punya user yang lagi login.
+// Konvensinya dibahas di docs/database-conventions.md.
 func cliContext() context.Context {
 	return database.WithActor(context.Background(), database.Actor{UserID: uuid.Nil, Scope: "cli"})
 }
@@ -35,16 +35,16 @@ func init() {
 func newTenantService(cfg *config.Config) (*platformtenant.Service, func(), error) {
 	platformDB, err := database.NewPlatformPool(cfg.DB)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect (platform pool): %w", err)
+		return nil, nil, fmt.Errorf("gagal terhubung ke database (pool platform): %w", err)
 	}
 	rawDB, err := openRawDB(cfg.DB.DSN())
 	if err != nil {
 		platformDB.Close()
-		return nil, nil, fmt.Errorf("connect (raw pool): %w", err)
+		return nil, nil, fmt.Errorf("gagal terhubung ke database (pool mentah): %w", err)
 	}
 
 	repo := platformtenant.NewRepository(platformDB, rawDB)
-	resolver := middleware.NewTenantResolver(repo, 0) // CLI never needs caching — one-shot process
+	resolver := middleware.NewTenantResolver(repo, 0) // CLI nggak butuh cache — sekali jalan langsung selesai
 	svc := platformtenant.NewService(repo, rawDB, resolver)
 
 	cleanup := func() {
@@ -56,13 +56,13 @@ func newTenantService(cfg *config.Config) (*platformtenant.Service, func(), erro
 
 func cmdTenantCreate(args []string) error {
 	fs := flag.NewFlagSet("tenant create", flag.ExitOnError)
-	code := fs.String("code", "", "tenant code (required)")
-	name := fs.String("name", "", "tenant name (required)")
-	ownerEmail := fs.String("owner-email", "", "first owner's email (required)")
+	code := fs.String("code", "", "kode tenant (wajib diisi)")
+	name := fs.String("name", "", "nama tenant (wajib diisi)")
+	ownerEmail := fs.String("owner-email", "", "email pemilik pertama (wajib diisi)")
 	fs.Parse(args)
 
 	if *code == "" || *name == "" || *ownerEmail == "" {
-		return fmt.Errorf("--code, --name, and --owner-email are all required")
+		return fmt.Errorf("--code, --name, dan --owner-email semuanya wajib diisi")
 	}
 
 	cfg, err := config.Load()
@@ -82,11 +82,11 @@ func cmdTenantCreate(args []string) error {
 		return err
 	}
 
-	fmt.Println("tenant provisioned:")
-	fmt.Println("  code:          ", result.Tenant.Code)
-	fmt.Println("  owner email:   ", *ownerEmail)
-	fmt.Println("  owner password:", result.OwnerPassword)
-	fmt.Println("(this password is shown once — change it after first login)")
+	fmt.Println("tenant berhasil disiapkan:")
+	fmt.Println("  kode:            ", result.Tenant.Code)
+	fmt.Println("  email pemilik:   ", *ownerEmail)
+	fmt.Println("  password pemilik:", result.OwnerPassword)
+	fmt.Println("(password ini hanya ditampilkan sekali — ganti setelah login pertama)")
 	return nil
 }
 
@@ -119,10 +119,10 @@ func cmdTenantDelete(args []string) error   { return tenantStatusCommand(args, "
 
 func tenantStatusCommand(args []string, name string, action func(*platformtenant.Service, context.Context, string) error) error {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	code := fs.String("code", "", "tenant code (required)")
+	code := fs.String("code", "", "kode tenant (wajib diisi)")
 	fs.Parse(args)
 	if *code == "" {
-		return fmt.Errorf("--code is required")
+		return fmt.Errorf("--code wajib diisi")
 	}
 
 	cfg, err := config.Load()
@@ -144,14 +144,14 @@ func tenantStatusCommand(args []string, name string, action func(*platformtenant
 
 func cmdTenantPurge(args []string) error {
 	fs := flag.NewFlagSet("tenant purge", flag.ExitOnError)
-	code := fs.String("code", "", "tenant code (required)")
-	confirm := fs.Bool("confirm", false, "required acknowledgement — this is irreversible")
+	code := fs.String("code", "", "kode tenant (wajib diisi)")
+	confirm := fs.Bool("confirm", false, "penegasan wajib — tindakan ini tidak bisa dibatalkan")
 	fs.Parse(args)
 	if *code == "" {
-		return fmt.Errorf("--code is required")
+		return fmt.Errorf("--code wajib diisi")
 	}
 	if !*confirm {
-		return fmt.Errorf("pass --confirm to acknowledge this permanently deletes the tenant's data")
+		return fmt.Errorf("sertakan --confirm sebagai tanda kamu paham data tenant ini akan dihapus permanen")
 	}
 
 	cfg, err := config.Load()
@@ -167,6 +167,6 @@ func cmdTenantPurge(args []string) error {
 	if err := svc.Purge(cliContext(), *code); err != nil {
 		return err
 	}
-	fmt.Println("tenant permanently purged")
+	fmt.Println("tenant sudah dihapus permanen")
 	return nil
 }

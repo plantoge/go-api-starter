@@ -11,15 +11,16 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// ValidationError collects every configuration problem at once, so a
-// misconfigured deploy fails once with a complete list instead of one env
-// var per attempt.
+// ValidationError ngumpulin semua masalah konfigurasi sekaligus, jadi
+// deploy yang salah setelan gagal sekali dengan daftar lengkap — bukan
+// satu env var tiap kali dicoba.
 //
-// It renders two ways because the readers differ. Error() is the form that
-// ends up in structured logs: a single line, because slog's handlers quote
-// any value containing newlines — an embedded "\n" would be printed
-// literally as two characters rather than breaking the line. Multiline() is
-// for a terminal, where one problem per line is far easier to scan.
+// Bentuk tampilannya ada dua, karena pembacanya beda. Error() dipakai buat
+// log terstruktur: satu baris saja, soalnya handler slog bakal ngasih
+// tanda kutip ke nilai yang mengandung baris baru — "\n" di dalamnya bakal
+// tercetak apa adanya sebagai dua karakter, bukan ganti baris beneran.
+// Multiline() dipakai di terminal, di mana satu masalah per baris jelas
+// jauh lebih enak dibaca.
 type ValidationError struct {
 	Problems []string
 }
@@ -40,9 +41,9 @@ func (e *ValidationError) Multiline() string {
 	return b.String()
 }
 
-// Explain picks the most readable rendering of an error for terminal
-// output. Both cmd/api and cmd/cli use it so a configuration failure looks
-// the same whichever binary hit it.
+// Explain milih bentuk tampilan error yang paling enak dibaca di
+// terminal. Dipakai cmd/api maupun cmd/cli, biar kegagalan konfigurasi
+// kelihatan sama saja lewat binary mana pun.
 func Explain(err error) string {
 	var ve *ValidationError
 	if errors.As(err, &ve) {
@@ -101,12 +102,12 @@ type Config struct {
 	CORS  CORSConfig
 }
 
-// Load reads configuration from the process environment (loading a local
-// .env file first, if one exists) and validates it. Every problem is
-// collected and returned together so a misconfigured deploy fails once,
-// with a complete list, instead of one env var at a time.
+// Load baca konfigurasi dari environment proses (kalau ada file .env
+// lokal, itu dimuat duluan) lalu memvalidasinya. Semua masalah dikumpulin
+// dan dikembalikan sekaligus, biar deploy yang salah setelan gagal sekali
+// dengan daftar lengkap, bukan satu env var tiap kali.
 func Load() (*Config, error) {
-	_ = godotenv.Load() // optional; real deploys set env vars directly
+	_ = godotenv.Load() // opsional; deploy sungguhan nyetel env var langsung
 
 	var errs []string
 	req := func(key string) string {
@@ -170,13 +171,14 @@ func Load() (*Config, error) {
 		},
 	}
 
-	// A short/weak JWT_SECRET is a real production risk, not just a style
-	// nit — anyone who can guess or brute-force it can forge access
-	// tokens for any user. .env.example ships a placeholder value that
-	// looks random but is publicly known (it's in version control); this
-	// check exists mainly to catch a deploy that copied .env.example
-	// verbatim without ever editing it, rather than to enforce true
-	// entropy (which a length check can't measure anyway).
+	// JWT_SECRET yang pendek atau lemah itu risiko produksi beneran, bukan
+	// sekadar masalah rapi-rapian: siapa pun yang bisa nebak atau
+	// nge-brute-force-nya bisa bikin access token palsu atas nama user mana
+	// pun. File .env.example emang bawa nilai contoh yang kelihatan acak
+	// tapi sebenarnya sudah publik (ada di version control). Pengecekan ini
+	// tujuannya lebih ke nangkep deploy yang nyalin .env.example bulat-bulat
+	// tanpa pernah diubah, bukan buat ngukur keacakan asli — yang toh nggak
+	// bisa diukur cuma dari panjangnya.
 	if cfg.JWT.Secret != "" && len(cfg.JWT.Secret) < 32 {
 		errs = append(errs, "JWT_SECRET minimal 32 karakter")
 	}

@@ -19,7 +19,7 @@ func main() {
 	cmdKey, rest := splitCommand(os.Args[1:])
 	handler, ok := commands.Lookup(cmdKey)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n\n", cmdKey)
+		fmt.Fprintf(os.Stderr, "perintah tidak dikenal: %q\n\n", cmdKey)
 		printUsage()
 		os.Exit(1)
 	}
@@ -29,19 +29,21 @@ func main() {
 		if errors.As(err, &ve) {
 			fmt.Fprintln(os.Stderr, ve.Multiline())
 		} else {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "gagal: %v\n", err)
 		}
 		os.Exit(1)
 	}
 }
 
-// splitCommand takes the leading non-flag arguments as the command name
-// (e.g. "migrate tenant up") and returns the rest as flags, so callers can
-// run `cli migrate tenant up --tenant=acme_corp`. Checks for a single "-"
-// prefix, not just "--" — Go's flag package accepts both forms
-// (`-all`/`--all`), so a single-dash flag must stop the command-name scan
-// the same way a double-dash one does, or it gets swallowed into the
-// command key and reported as "unknown command".
+// splitCommand ambil argumen depan yang bukan flag sebagai nama perintah
+// (misal "migrate tenant up"), sisanya dianggap flag. Jadi kita bisa nulis
+// `cli migrate tenant up --tenant=acme_corp`.
+//
+// Yang dicek awalan satu strip "-", bukan cuma "--". Soalnya package flag
+// bawaan Go nerima dua-duanya (`-all` atau `--all`), jadi flag berstrip
+// satu juga harus bikin pembacaan nama perintah berhenti. Kalau nggak,
+// flag itu ikut kebaca jadi bagian nama perintah dan ujungnya malah
+// dilaporin "perintah tidak dikenal".
 func splitCommand(args []string) (cmdKey string, rest []string) {
 	var parts []string
 	i := 0
@@ -53,8 +55,8 @@ func splitCommand(args []string) (cmdKey string, rest []string) {
 }
 
 func printUsage() {
-	fmt.Println("usage: cli <command> [flags]")
-	fmt.Println("\navailable commands:")
+	fmt.Println("cara pakai: cli <perintah> [flag]")
+	fmt.Println("\nperintah yang tersedia:")
 	for _, name := range commands.Names() {
 		fmt.Println("  " + name)
 	}

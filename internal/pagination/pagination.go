@@ -16,11 +16,11 @@ type Params struct {
 	Order string
 }
 
-// Parse reads page/limit/sort/order query params. sort must be a key in
-// sortable (the caller's whitelist of columns that are safe to interpolate
-// into ORDER BY) — anything else is rejected. This is the only place a raw
-// query value is allowed near a sort column name; every repository must go
-// through it rather than reading c.Query("sort") itself.
+// Parse baca query param page/limit/sort/order. Nilai sort wajib ada
+// sebagai kunci di sortable — whitelist kolom milik pemanggil yang memang
+// aman ditempel ke ORDER BY — selain itu ditolak. Cuma di sinilah nilai
+// query mentah boleh berdekatan dengan nama kolom sortir; semua repository
+// wajib lewat fungsi ini, jangan baca c.Query("sort") sendiri.
 func Parse(c *fiber.Ctx, sortable map[string]string, defaultSort string) (Params, *apperror.Error) {
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	if page < 1 {
@@ -56,17 +56,17 @@ func (p Params) Offset() int {
 	return (p.Page - 1) * p.Limit
 }
 
-// OrderByClause returns "<column> ASC|DESC" using ONLY the whitelisted SQL
-// column name from sortable[p.Sort] — never the raw p.Sort value itself —
-// so it is always safe to append directly to a query string.
+// OrderByClause ngasih balik "<kolom> ASC|DESC" dengan HANYA memakai nama
+// kolom SQL dari whitelist sortable[p.Sort] — nggak pernah nilai mentah
+// p.Sort — jadi hasilnya selalu aman ditempel langsung ke string query.
 //
-// Parse already rejects an unknown sort/order before a Params ever reaches
-// here, but a Params built by hand (bypassing Parse — e.g. a CLI command
-// constructing one directly) has no such guarantee. A missing key used to
-// silently produce a broken "ORDER BY  DESC" — a SQL syntax error, not an
-// injection risk, but an opaque one. col falls back to the ordinal
-// position "1" (always valid regardless of which columns exist); order
-// falls back to DESC.
+// Parse sebenarnya sudah nolak sort/order yang nggak dikenal sebelum
+// Params sampai ke sini. Tapi Params yang dirakit manual (lewat jalur yang
+// nggak pakai Parse — misalnya perintah CLI yang bikin sendiri) nggak
+// dapat jaminan itu. Dulu kunci yang nggak ketemu diam-diam menghasilkan
+// "ORDER BY  DESC" yang rusak — bukan celah injection, tapi error sintaks
+// SQL yang bikin bingung. Sekarang col jatuh ke posisi ordinal "1" (selalu
+// sah, apa pun kolom yang ada), dan order jatuh ke DESC.
 func (p Params) OrderByClause(sortable map[string]string) string {
 	col, ok := sortable[p.Sort]
 	if !ok {

@@ -78,7 +78,7 @@ func doJSON(t *testing.T, app *fiber.App, method, path string, body any, token s
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := app.Test(req, -1) // -1: no timeout — these steps hit real Postgres
+	resp, err := app.Test(req, -1) // -1: tanpa timeout — langkah-langkah ini nembak Postgres sungguhan
 	if err != nil {
 		t.Fatalf("app.Test %s %s: %v", method, path, err)
 	}
@@ -124,8 +124,9 @@ func TestTenantIsolation_AcrossTwoTenantsWithSimilarData(t *testing.T) {
 	tokenA := loginAsOwner(t, app, codeA, "owner@acme.test", resA.OwnerPassword)
 	tokenB := loginAsOwner(t, app, codeB, "owner@globex.test", resB.OwnerPassword)
 
-	// Same email on purpose — if isolation ever breaks, a unique-index
-	// collision or cross-visibility here is exactly how it would surface.
+	// Sengaja pakai email yang sama — kalau isolasinya sampai jebol,
+	// tabrakan unique index atau data yang saling kelihatan di sinilah
+	// gejalanya bakal muncul.
 	respA, bodyA := doJSON(t, app, http.MethodPost, "/api/v1/users", map[string]string{
 		"email": "staff@example.com", "password": "correct-horse-battery", "name": "Staff A",
 	}, tokenA)
@@ -147,17 +148,18 @@ func TestTenantIsolation_AcrossTwoTenantsWithSimilarData(t *testing.T) {
 	_, listB := doJSON(t, app, http.MethodGet, "/api/v1/users?limit=100", nil, tokenB)
 	assertNamesPresentAbsent(t, listB, []string{"Staff B"}, []string{"Staff A"})
 
-	// Positive control: tenant A fetching its own user by ID must succeed.
-	// Without this, the negative check below is ambiguous between "isolation
-	// held" and "the route/handler is broken and always 404s."
+	// Kontrol positif: tenant A ngambil user miliknya sendiri lewat ID
+	// harus berhasil. Tanpa ini, pengecekan negatif di bawah jadi
+	// ambigu antara "isolasinya jalan" dan "route/handler-nya rusak dan
+	// selalu balikin 404".
 	respOwn, bodyOwn := doJSON(t, app, http.MethodGet, "/api/v1/users/"+staffAID, nil, tokenA)
 	if respOwn.StatusCode != 200 {
 		t.Fatalf("tenant A fetching its own user by ID failed: status=%d body=%v", respOwn.StatusCode, bodyOwn)
 	}
 
-	// The strongest check: tenant B, holding tenant A's own user ID,
-	// cannot fetch it — WithTenant scopes every query to the caller's
-	// schema regardless of which ID is asked for.
+	// Pengecekan paling keras: tenant B yang megang ID user milik tenant A
+	// tetap nggak bisa ngambil datanya — WithTenant ngunci tiap query ke
+	// schema milik si pemanggil, apa pun ID yang diminta.
 	respCross, _ := doJSON(t, app, http.MethodGet, "/api/v1/users/"+staffAID, nil, tokenB)
 	if respCross.StatusCode != 404 {
 		t.Errorf("tenant B fetched tenant A's user by ID: status=%d, want 404", respCross.StatusCode)

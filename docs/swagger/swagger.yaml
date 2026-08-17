@@ -109,8 +109,9 @@ definitions:
     type: object
 info:
   contact: {}
-  description: Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales
-    is the first thing built on it, not a fixed part of it.
+  description: Starter API multi-tenant — PostgreSQL dengan satu schema per tenant.
+    Point of Sales cuma hal pertama yang dibangun di atasnya, bukan bagian tetap dari
+    starter ini.
   title: App API
   version: "1.0"
 paths:
@@ -119,7 +120,7 @@ paths:
       consumes:
       - application/json
       parameters:
-      - description: credentials
+      - description: email dan password admin
         in: body
         name: body
         required: true
@@ -137,7 +138,7 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Admin login
+      summary: Login admin platform
       tags:
       - platform-auth
   /admin/auth/logout:
@@ -145,7 +146,7 @@ paths:
       consumes:
       - application/json
       parameters:
-      - description: refresh token
+      - description: refresh token yang mau dicabut
         in: body
         name: body
         required: true
@@ -159,7 +160,7 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Revoke an admin refresh token
+      summary: Cabut refresh token admin
       tags:
       - platform-auth
   /admin/auth/refresh:
@@ -167,7 +168,7 @@ paths:
       consumes:
       - application/json
       parameters:
-      - description: refresh token
+      - description: refresh token yang masih berlaku
         in: body
         name: body
         required: true
@@ -185,7 +186,7 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Refresh an admin access token
+      summary: Perbarui access token admin
       tags:
       - platform-auth
   /auth/login:
@@ -193,7 +194,7 @@ paths:
       consumes:
       - application/json
       parameters:
-      - description: tenant_code, credentials
+      - description: tenant_code, email, dan password
         in: body
         name: body
         required: true
@@ -211,7 +212,7 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Tenant staff login
+      summary: Login staf tenant
       tags:
       - tenant-auth
   /auth/logout:
@@ -219,7 +220,7 @@ paths:
       consumes:
       - application/json
       parameters:
-      - description: tenant_code, refresh token
+      - description: tenant_code dan refresh token yang mau dicabut
         in: body
         name: body
         required: true
@@ -233,7 +234,7 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Revoke a tenant refresh token
+      summary: Cabut refresh token tenant
       tags:
       - tenant-auth
   /auth/refresh:
@@ -241,7 +242,7 @@ paths:
       consumes:
       - application/json
       parameters:
-      - description: tenant_code, refresh token
+      - description: tenant_code dan refresh token
         in: body
         name: body
         required: true
@@ -259,25 +260,25 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Refresh a tenant access token
+      summary: Perbarui access token tenant
       tags:
       - tenant-auth
   /users:
     get:
       parameters:
-      - description: page number
+      - description: nomor halaman
         in: query
         name: page
         type: integer
-      - description: page size, max 100
+      - description: jumlah data per halaman, maksimal 100
         in: query
         name: limit
         type: integer
-      - description: created_at, name, or email
+      - description: created_at, name, atau email
         in: query
         name: sort
         type: string
-      - description: asc or desc
+      - description: asc atau desc
         in: query
         name: order
         type: string
@@ -291,14 +292,14 @@ paths:
             type: object
       security:
       - BearerAuth: []
-      summary: List tenant users
+      summary: Daftar user tenant
       tags:
       - users
     post:
       consumes:
       - application/json
       parameters:
-      - description: new user
+      - description: data user baru
         in: body
         name: body
         required: true
@@ -318,13 +319,13 @@ paths:
             type: object
       security:
       - BearerAuth: []
-      summary: Create a tenant user
+      summary: Buat user tenant
       tags:
       - users
   /users/{id}:
     delete:
       parameters:
-      - description: user id
+      - description: id user
         in: path
         name: id
         required: true
@@ -344,12 +345,12 @@ paths:
             type: object
       security:
       - BearerAuth: []
-      summary: Soft-delete a tenant user
+      summary: Hapus user tenant (soft delete)
       tags:
       - users
     get:
       parameters:
-      - description: user id
+      - description: id user
         in: path
         name: id
         required: true
@@ -368,19 +369,19 @@ paths:
             type: object
       security:
       - BearerAuth: []
-      summary: Get a tenant user by ID
+      summary: Ambil satu user tenant berdasarkan ID
       tags:
       - users
     patch:
       consumes:
       - application/json
       parameters:
-      - description: user id
+      - description: id user
         in: path
         name: id
         required: true
         type: string
-      - description: fields to change
+      - description: field yang mau diubah
         in: body
         name: body
         required: true
@@ -401,7 +402,7 @@ paths:
             type: object
       security:
       - BearerAuth: []
-      summary: Update a tenant user
+      summary: Perbarui user tenant
       tags:
       - users
 securityDefinitions:

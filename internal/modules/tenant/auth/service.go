@@ -15,9 +15,9 @@ import (
 	"go-api-starter/internal/ratelimit"
 )
 
-// TenantLookup resolves a tenant_code to enough info to attempt a login.
-// Declared here, consumer-side, and implemented by
-// modules/platform/tenant.Repository (Task 14).
+// TenantLookup ngubah tenant_code jadi informasi yang cukup buat mencoba
+// login. Dideklarasikan di sini, di sisi pemakai, dan diimplementasikan
+// sama modules/platform/tenant.Repository (Task 14).
 type TenantLookup interface {
 	FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error)
 }
@@ -41,13 +41,13 @@ func NewService(db *database.DB, tenants TenantLookup, tokens *appauth.TokenMana
 	return &Service{db: db, tenants: tenants, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
 }
 
-// dummyPasswordHash is a valid bcrypt hash of an unused, unguessable
-// password. Login always runs exactly one VerifyPassword call — against
-// the real user's hash when found and active, or against this fixed hash
-// when not — so response timing never reveals whether an email
-// exists/is active versus exists-with-a-wrong-password. Same pattern and
-// same rationale as Task 12's platform admin auth service, duplicated
-// here because it's a different package.
+// dummyPasswordHash itu hash bcrypt yang sah dari password yang nggak
+// dipakai dan nggak mungkin ditebak. Login selalu manggil VerifyPassword
+// tepat sekali — ke hash user aslinya kalau ketemu dan aktif, atau ke hash
+// tetap ini kalau nggak — jadi lama waktu respons nggak pernah ngebocorin
+// mana email yang ada/aktif dan mana yang cuma salah password. Polanya dan
+// alasannya sama persis kayak service auth admin platform di Task 12;
+// ditulis ulang di sini karena beda package.
 var dummyPasswordHash = mustHashDummyPassword()
 
 func mustHashDummyPassword() string {
@@ -68,9 +68,9 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 		return LoginResponse{}, err
 	}
 
-	// Login is the one place tenant identity is established without a
-	// prior RequireTenant pass — there's no token yet — so TenantInfo is
-	// injected into ctx by hand before using WithTenant.
+	// Login satu-satunya tempat identitas tenant ditentukan tanpa lewat
+	// RequireTenant duluan — wong token-nya memang belum ada — jadi
+	// TenantInfo dimasukin ke ctx secara manual sebelum pakai WithTenant.
 	tenantCtx := database.WithTenantInfo(ctx, database.TenantInfo{
 		TenantID: tenantRec.TenantID, SchemaName: tenantRec.SchemaName,
 	})
@@ -82,21 +82,21 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 		if getErr == nil {
 			found = true
 		}
-		return nil // a missing user isn't a transaction failure — just an invalid login
+		return nil // user nggak ketemu bukan berarti transaksinya gagal — cuma login yang nggak sah
 	})
 	if err != nil {
 		return LoginResponse{}, apperror.Internal(err)
 	}
 
-	// Amendment (added alongside the identical Task 12 fix, for the same
-	// reason): always call VerifyPassword — on the real hash if found and
-	// active, on the fixed dummyPasswordHash otherwise — so this line's
-	// cost is the same on every path. Without this, && short-circuiting
-	// skips the bcrypt call whenever the user isn't found/inactive,
-	// letting response timing leak which emails exist. This package
-	// defines its own dummyPasswordHash/mustHashDummyPassword (same
-	// pattern as Task 12's platform auth service, but not the same
-	// variable — different package) — add them alongside Service below.
+	// Catatan perbaikan (dibuat barengan dengan perbaikan serupa di Task
+	// 12, alasannya sama): VerifyPassword selalu dipanggil — ke hash asli
+	// kalau user-nya ketemu dan aktif, ke dummyPasswordHash kalau nggak —
+	// biar ongkos baris ini sama di semua jalur. Tanpa ini, short-circuit
+	// && bakal ngelewatin panggilan bcrypt tiap kali user-nya nggak
+	// ketemu atau nggak aktif, dan lama respons jadi ngebocorin email mana
+	// yang terdaftar. Package ini punya dummyPasswordHash dan
+	// mustHashDummyPassword sendiri (polanya sama kayak service auth
+	// platform di Task 12, tapi bukan variabel yang sama — beda package).
 	activeFound := found && u.IsActive
 	hashToCheck := dummyPasswordHash
 	if activeFound {
@@ -104,10 +104,10 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 	}
 	passwordOK := appauth.VerifyPassword(hashToCheck, req.Password)
 	valid := activeFound && passwordOK
-	// If recording the attempt itself fails, brute-force protection
-	// degrades silently for this email/tenant unless we log it — the login
-	// still resolves correctly either way, only the rate-limit counter
-	// might undercount.
+	// Kalau pencatatan percobaannya sendiri gagal, perlindungan brute-force
+	// buat email/tenant ini diam-diam melemah — makanya tetap di-log.
+	// Login-nya sendiri tetap diputuskan dengan benar, cuma penghitung
+	// rate limit-nya yang mungkin kurang dari kenyataan.
 	if err := s.rateLimiter.Record(ctx, appauth.ScopeTenant, &tenantRec.TenantID, req.Email, valid); err != nil {
 		slog.Error("rate limiter record failed", "scope", appauth.ScopeTenant, "tenant_id", tenantRec.TenantID, "error", err)
 	}

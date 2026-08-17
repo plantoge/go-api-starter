@@ -23,11 +23,11 @@ func badBody(c *fiber.Ctx) error {
 }
 
 // Login godoc
-// @Summary      Tenant staff login
+// @Summary      Login staf tenant
 // @Tags         tenant-auth
 // @Accept       json
 // @Produce      json
-// @Param        body body LoginRequest true "tenant_code, credentials"
+// @Param        body body LoginRequest true "tenant_code, email, dan password"
 // @Success      200 {object} LoginResponse
 // @Failure      401 {object} map[string]any
 // @Router       /auth/login [post]
@@ -47,11 +47,11 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 }
 
 // Refresh godoc
-// @Summary      Refresh a tenant access token
+// @Summary      Perbarui access token tenant
 // @Tags         tenant-auth
 // @Accept       json
 // @Produce      json
-// @Param        body body RefreshRequest true "tenant_code, refresh token"
+// @Param        body body RefreshRequest true "tenant_code dan refresh token"
 // @Success      200 {object} LoginResponse
 // @Failure      401 {object} map[string]any
 // @Router       /auth/refresh [post]
@@ -71,11 +71,11 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 }
 
 // Logout godoc
-// @Summary      Revoke a tenant refresh token
+// @Summary      Cabut refresh token tenant
 // @Tags         tenant-auth
 // @Accept       json
 // @Produce      json
-// @Param        body body LogoutRequest true "tenant_code, refresh token"
+// @Param        body body LogoutRequest true "tenant_code dan refresh token yang mau dicabut"
 // @Success      200 {object} map[string]any
 // @Router       /auth/logout [post]
 func (h *Handler) Logout(c *fiber.Ctx) error {

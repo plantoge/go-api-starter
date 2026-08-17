@@ -13,8 +13,9 @@ import (
 	"go-api-starter/internal/testsupport"
 )
 
-// setupTenantService gives every test in this file a fresh Service wired
-// to real platform.tenants + a raw *sql.DB for provisioning transactions.
+// setupTenantService ngasih tiap test di file ini Service yang baru,
+// tersambung ke platform.tenants sungguhan plus *sql.DB polos buat
+// transaksi penyiapan tenant.
 func setupTenantService(t *testing.T) (*platformtenant.Service, *platformtenant.Repository) {
 	t.Helper()
 	rawPool := testsupport.OpenTestDB(t)

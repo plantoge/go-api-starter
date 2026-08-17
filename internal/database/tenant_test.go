@@ -67,7 +67,7 @@ func TestWithTenant_IsolatesSchemas(t *testing.T) {
 
 func TestWithTenant_RollbackClearsSearchPath(t *testing.T) {
 	pool := testsupport.OpenTestDB(t)
-	pool.SetMaxOpenConns(1) // force both calls below onto the same physical connection
+	pool.SetMaxOpenConns(1) // paksa dua panggilan di bawah lewat koneksi fisik yang sama
 	db := database.NewDB(pool)
 
 	schemaA := testsupport.RandomSchemaName()
@@ -97,17 +97,17 @@ func TestWithTenant_RollbackClearsSearchPath(t *testing.T) {
 	}
 }
 
-// TestWithTenant_CommitClearsSearchPath guards specifically against a
-// regression to plain SET (instead of SET LOCAL): plain SET would also
-// pass TestWithTenant_RollbackClearsSearchPath (SET is transactional on
-// rollback too), but a *committed* transaction using plain SET leaves
-// search_path pinned on the physical connection for whichever query
-// reuses it next. SET LOCAL is discarded at commit as well as rollback,
-// so after a successful WithTenant call the pool's own search_path must
-// be back at the connection default, not the tenant schema.
+// TestWithTenant_CommitClearsSearchPath khusus jaga-jaga kalau SET LOCAL
+// suatu saat kepeleset jadi SET biasa. SET biasa sebenarnya juga lolos di
+// TestWithTenant_RollbackClearsSearchPath (SET tetap transaksional pas
+// rollback), tapi transaksi yang di-*commit* pakai SET biasa bakal
+// ninggalin search_path nempel di koneksi fisiknya, dan kebawa ke query
+// mana pun yang make koneksi itu berikutnya. SET LOCAL dibuang baik saat
+// commit maupun rollback, jadi setelah WithTenant sukses, search_path
+// milik pool harus balik ke nilai bawaan koneksi, bukan schema tenant.
 func TestWithTenant_CommitClearsSearchPath(t *testing.T) {
 	pool := testsupport.OpenTestDB(t)
-	pool.SetMaxOpenConns(1) // force the check below onto the same physical connection
+	pool.SetMaxOpenConns(1) // paksa pengecekan di bawah lewat koneksi fisik yang sama
 	db := database.NewDB(pool)
 
 	schemaA := testsupport.RandomSchemaName()
@@ -134,9 +134,9 @@ func TestWithTenant_CommitClearsSearchPath(t *testing.T) {
 }
 
 func TestWithTenant_NoTenantInContext_ReturnsError(t *testing.T) {
-	// No live DB needed: WithTenant returns before ever touching db.Pool
-	// when the context carries no TenantInfo, so a nil pool is safe here
-	// and lets this test run (and pass) without a database.
+	// Nggak butuh database hidup: kalau context-nya nggak bawa TenantInfo,
+	// WithTenant balik duluan sebelum nyentuh db.Pool. Jadi pool nil aman
+	// di sini, dan test ini bisa jalan (dan lulus) tanpa database.
 	db := database.NewDB(nil)
 
 	err := db.WithTenant(context.Background(), func(tx *sqlx.Tx) error {
@@ -149,9 +149,9 @@ func TestWithTenant_NoTenantInContext_ReturnsError(t *testing.T) {
 }
 
 func TestWithTenant_InvalidSchemaName_ReturnsError(t *testing.T) {
-	// Same reasoning as above: the invalid-schema-name check happens
-	// before db.Pool is ever touched, so a nil pool is safe and this
-	// test runs without a database.
+	// Alasannya sama kayak di atas: pengecekan nama schema yang nggak valid
+	// terjadi sebelum db.Pool disentuh, jadi pool nil aman dan test ini
+	// jalan tanpa database.
 	db := database.NewDB(nil)
 
 	ctx := database.WithTenantInfo(context.Background(), database.TenantInfo{

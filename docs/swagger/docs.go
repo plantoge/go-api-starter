@@ -26,10 +26,10 @@ const docTemplate = `{
                 "tags": [
                     "platform-auth"
                 ],
-                "summary": "Admin login",
+                "summary": "Login admin platform",
                 "parameters": [
                     {
-                        "description": "credentials",
+                        "description": "email dan password admin",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -66,10 +66,10 @@ const docTemplate = `{
                 "tags": [
                     "platform-auth"
                 ],
-                "summary": "Revoke an admin refresh token",
+                "summary": "Cabut refresh token admin",
                 "parameters": [
                     {
-                        "description": "refresh token",
+                        "description": "refresh token yang mau dicabut",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -100,10 +100,10 @@ const docTemplate = `{
                 "tags": [
                     "platform-auth"
                 ],
-                "summary": "Refresh an admin access token",
+                "summary": "Perbarui access token admin",
                 "parameters": [
                     {
-                        "description": "refresh token",
+                        "description": "refresh token yang masih berlaku",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -140,10 +140,10 @@ const docTemplate = `{
                 "tags": [
                     "tenant-auth"
                 ],
-                "summary": "Tenant staff login",
+                "summary": "Login staf tenant",
                 "parameters": [
                     {
-                        "description": "tenant_code, credentials",
+                        "description": "tenant_code, email, dan password",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -180,10 +180,10 @@ const docTemplate = `{
                 "tags": [
                     "tenant-auth"
                 ],
-                "summary": "Revoke a tenant refresh token",
+                "summary": "Cabut refresh token tenant",
                 "parameters": [
                     {
-                        "description": "tenant_code, refresh token",
+                        "description": "tenant_code dan refresh token yang mau dicabut",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -214,10 +214,10 @@ const docTemplate = `{
                 "tags": [
                     "tenant-auth"
                 ],
-                "summary": "Refresh a tenant access token",
+                "summary": "Perbarui access token tenant",
                 "parameters": [
                     {
-                        "description": "tenant_code, refresh token",
+                        "description": "tenant_code dan refresh token",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -256,29 +256,29 @@ const docTemplate = `{
                 "tags": [
                     "users"
                 ],
-                "summary": "List tenant users",
+                "summary": "Daftar user tenant",
                 "parameters": [
                     {
                         "type": "integer",
-                        "description": "page number",
+                        "description": "nomor halaman",
                         "name": "page",
                         "in": "query"
                     },
                     {
                         "type": "integer",
-                        "description": "page size, max 100",
+                        "description": "jumlah data per halaman, maksimal 100",
                         "name": "limit",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "created_at, name, or email",
+                        "description": "created_at, name, atau email",
                         "name": "sort",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "asc or desc",
+                        "description": "asc atau desc",
                         "name": "order",
                         "in": "query"
                     }
@@ -308,10 +308,10 @@ const docTemplate = `{
                 "tags": [
                     "users"
                 ],
-                "summary": "Create a tenant user",
+                "summary": "Buat user tenant",
                 "parameters": [
                     {
-                        "description": "new user",
+                        "description": "data user baru",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -350,11 +350,11 @@ const docTemplate = `{
                 "tags": [
                     "users"
                 ],
-                "summary": "Get a tenant user by ID",
+                "summary": "Ambil satu user tenant berdasarkan ID",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "user id",
+                        "description": "id user",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -388,11 +388,11 @@ const docTemplate = `{
                 "tags": [
                     "users"
                 ],
-                "summary": "Soft-delete a tenant user",
+                "summary": "Hapus user tenant (soft delete)",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "user id",
+                        "description": "id user",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -430,17 +430,17 @@ const docTemplate = `{
                 "tags": [
                     "users"
                 ],
-                "summary": "Update a tenant user",
+                "summary": "Perbarui user tenant",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "user id",
+                        "description": "id user",
                         "name": "id",
                         "in": "path",
                         "required": true
                     },
                     {
-                        "description": "fields to change",
+                        "description": "field yang mau diubah",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -648,7 +648,7 @@ var SwaggerInfo = &swag.Spec{
 	BasePath:         "/api/v1",
 	Schemes:          []string{},
 	Title:            "App API",
-	Description:      "Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.",
+	Description:      "Starter API multi-tenant — PostgreSQL dengan satu schema per tenant. Point of Sales cuma hal pertama yang dibangun di atasnya, bukan bagian tetap dari starter ini.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

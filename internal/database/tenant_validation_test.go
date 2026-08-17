@@ -6,11 +6,12 @@ import (
 	"go-api-starter/internal/database"
 )
 
-// TestValidSchemaName exercises ValidSchemaName directly — it is the sole
-// barrier standing between a caller-controlled TenantInfo.SchemaName and
-// raw SQL interpolation in WithTenant's SET LOCAL statement, so every
-// rejection case here matters. This is a pure function: no database
-// connection needed, so it always runs (never skips).
+// TestValidSchemaName nguji ValidSchemaName secara langsung. Fungsi itu
+// satu-satunya penghalang antara TenantInfo.SchemaName yang nilainya
+// dikendalikan pemanggil dan penempelan mentah ke SQL di statement SET
+// LOCAL milik WithTenant — jadi tiap kasus penolakan di sini penting.
+// Fungsinya murni, nggak butuh koneksi database, jadi test ini selalu
+// jalan dan nggak pernah di-skip.
 func TestValidSchemaName(t *testing.T) {
 	tests := []struct {
 		name  string

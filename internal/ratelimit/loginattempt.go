@@ -10,7 +10,7 @@ import (
 )
 
 type LoginAttemptService struct {
-	db          *sqlx.DB // pinned to the platform schema
+	db          *sqlx.DB // dikunci ke schema platform
 	maxAttempts int
 	window      time.Duration
 }
@@ -19,10 +19,11 @@ func NewLoginAttemptService(platformDB *sqlx.DB, maxAttempts int, window time.Du
 	return &LoginAttemptService{db: platformDB, maxAttempts: maxAttempts, window: window}
 }
 
-// Check returns apperror.RateLimited if email — scoped to scope and, for
-// tenant logins, tenantID — has failed to log in maxAttempts times or more
-// within the last window. Called before verifying credentials, so a
-// blocked caller never even reaches the password check.
+// Check balikin apperror.RateLimited kalau email tersebut — dihitung per
+// scope, dan buat login tenant juga per tenantID — sudah gagal login
+// sebanyak maxAttempts kali atau lebih dalam rentang window terakhir.
+// Dipanggil sebelum kredensial diperiksa, jadi pemanggil yang kena blokir
+// bahkan nggak sampai ke tahap pengecekan password.
 func (s *LoginAttemptService) Check(ctx context.Context, scope string, tenantID *uuid.UUID, email string) error {
 	const query = `
 		SELECT count(*) FROM login_attempts
@@ -40,9 +41,9 @@ func (s *LoginAttemptService) Check(ctx context.Context, scope string, tenantID 
 	return nil
 }
 
-// Record logs one login attempt, successful or not. Every login flow calls
-// this exactly once per attempt, after Check and after verifying (or
-// failing to verify) credentials.
+// Record nyatet satu percobaan login, berhasil maupun gagal. Semua alur
+// login manggil ini tepat sekali per percobaan: setelah Check, dan setelah
+// kredensialnya selesai diperiksa (baik cocok maupun nggak).
 func (s *LoginAttemptService) Record(ctx context.Context, scope string, tenantID *uuid.UUID, email string, success bool) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO login_attempts (id, scope, tenant_id, email, success) VALUES ($1, $2, $3, $4, $5)`,

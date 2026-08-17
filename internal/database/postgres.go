@@ -8,25 +8,25 @@ import (
 	"go-api-starter/internal/config"
 )
 
-// NewPool opens the main application connection pool, used for tenant-
-// scoped queries via WithTenant. search_path is left at the connection
-// default; WithTenant pins it per-transaction.
+// NewPool buka pool koneksi utama aplikasi, yang dipakai buat query
+// ber-scope tenant lewat WithTenant. search_path-nya dibiarkan di nilai
+// bawaan koneksi; WithTenant yang nanti nguncinya per transaksi.
 func NewPool(cfg config.DBConfig) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("pgx", cfg.DSN())
 	if err != nil {
-		return nil, fmt.Errorf("connect to database: %w", err)
+		return nil, fmt.Errorf("gagal terhubung ke database: %w", err)
 	}
 	configurePool(db, cfg)
 	return db, nil
 }
 
-// NewPlatformPool opens a pool pinned to search_path=platform on every
-// connection, so platform repositories write unqualified table names
-// ("FROM tenants") and never need WithTenant.
+// NewPlatformPool buka pool yang tiap koneksinya dikunci ke
+// search_path=platform. Jadi repository platform bisa nulis nama tabel
+// tanpa prefix ("FROM tenants") dan nggak pernah butuh WithTenant.
 func NewPlatformPool(cfg config.DBConfig) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("pgx", cfg.PlatformDSN())
 	if err != nil {
-		return nil, fmt.Errorf("connect to platform schema: %w", err)
+		return nil, fmt.Errorf("gagal terhubung ke schema platform: %w", err)
 	}
 	configurePool(db, cfg)
 	return db, nil

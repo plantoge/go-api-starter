@@ -10,10 +10,10 @@ const (
 	RoleManage = "role.manage"
 )
 
-// All lists every permission constant above. Tenant provisioning (Task 14)
-// seeds each of these into a brand new tenant's permissions table; Sync
-// (sync.go) brings already-provisioned tenants up to date when a new
-// constant is added later.
+// All berisi semua konstanta permission di atas. Saat tenant baru
+// disiapkan (Task 14), semuanya ditanam ke tabel permissions milik tenant
+// itu. Sedangkan Sync (sync.go) yang nyusulin tenant lama kalau nanti ada
+// konstanta baru ditambahin di sini.
 var All = []string{
 	UserView, UserCreate, UserUpdate, UserDelete,
 	RoleView, RoleManage,

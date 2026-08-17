@@ -20,10 +20,10 @@ func VerifyPassword(hash, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
-// commonPasswords is a short blocklist of passwords long enough to pass
-// the length check but still trivially guessable. Intentionally small —
-// the length requirement does most of the work; this just catches the
-// most obvious misses.
+// commonPasswords daftar pendek password yang panjangnya lolos pengecekan
+// tapi tetap gampang banget ditebak. Sengaja dibikin kecil — syarat
+// panjang sudah ngerjain sebagian besar tugasnya, ini cuma nangkep yang
+// paling kelewat jelas.
 var commonPasswords = map[string]bool{
 	"password":  true,
 	"12345678":  true,
@@ -34,11 +34,12 @@ var commonPasswords = map[string]bool{
 	"letmein11": true,
 }
 
-// ValidatePasswordStrength enforces the starter's password policy: at
-// least 8 characters, not on the common-password blocklist. Deliberately
-// no uppercase/digit/symbol requirement — those rules are well documented
-// to push people toward predictable patterns or writing passwords down,
-// without meaningfully raising guess-resistance over plain length.
+// ValidatePasswordStrength nerapin aturan password di starter ini:
+// minimal 8 karakter dan nggak masuk daftar password pasaran. Sengaja
+// nggak ada kewajiban huruf besar/angka/simbol — aturan begitu sudah
+// banyak dibuktikan cuma bikin orang milih pola yang ketebak atau nyatet
+// passwordnya, tanpa bikin lebih susah ditebak dibanding sekadar bikin
+// lebih panjang.
 func ValidatePasswordStrength(plain string) *apperror.Error {
 	details := map[string][]string{}
 	if len(plain) < 8 {

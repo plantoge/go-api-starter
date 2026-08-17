@@ -28,10 +28,10 @@ func NewTokenManager(secret string, accessTTL time.Duration) *TokenManager {
 	return &TokenManager{secret: []byte(secret), accessTTL: accessTTL}
 }
 
-// IssueAccessToken signs a short-lived access token. tenantID must be
-// non-nil for ScopeTenant and nil for ScopePlatform — each side's auth
-// service (Tasks 12 and 16) enforces which is which; this just carries
-// whatever it's given.
+// IssueAccessToken nandatanganin access token berumur pendek. tenantID
+// wajib terisi buat ScopeTenant dan wajib nil buat ScopePlatform — yang
+// nentuin mana yang mana adalah service auth di masing-masing sisi (Task
+// 12 dan 16); fungsi ini cuma bawa apa yang dikasih.
 func (tm *TokenManager) IssueAccessToken(userID uuid.UUID, scope string, tenantID *uuid.UUID) (string, error) {
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -49,15 +49,16 @@ func (tm *TokenManager) IssueAccessToken(userID uuid.UUID, scope string, tenantI
 	return token.SignedString(tm.secret)
 }
 
-// Verify parses and validates tokenString: signature and expiry only. It
-// never inspects permissions — permissions are deliberately not carried in
-// the token (see Task 15) — so a verified token proves who the caller is
-// and which scope they hold, nothing more.
+// Verify mem-parsing dan memeriksa tokenString: sebatas tanda tangan dan
+// masa berlaku. Dia nggak pernah ngecek permission — permission memang
+// sengaja nggak dititipin di dalam token (lihat Task 15) — jadi token yang
+// lolos verifikasi cuma membuktikan siapa pemanggilnya dan scope apa yang
+// dia pegang, nggak lebih.
 func (tm *TokenManager) Verify(tokenString string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected signing method")
+			return nil, errors.New("metode penandatanganan token tidak sesuai")
 		}
 		return tm.secret, nil
 	})
@@ -65,7 +66,7 @@ func (tm *TokenManager) Verify(tokenString string) (*Claims, error) {
 		return nil, err
 	}
 	if !token.Valid {
-		return nil, errors.New("invalid token")
+		return nil, errors.New("token tidak valid")
 	}
 	return claims, nil
 }

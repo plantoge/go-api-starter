@@ -1,6 +1,6 @@
 // @title           App API
 // @version         1.0
-// @description     Multi-tenant API starter — schema-per-tenant PostgreSQL. Point of Sales is the first thing built on it, not a fixed part of it.
+// @description     Starter API multi-tenant — PostgreSQL dengan satu schema per tenant. Point of Sales cuma hal pertama yang dibangun di atasnya, bukan bagian tetap dari starter ini.
 // @BasePath        /api/v1
 // @securitydefinitions.apikey BearerAuth
 // @in header
@@ -32,9 +32,10 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		// Printed rather than logged: this fails before the process has a
-		// configured logger, the only reader is a human at a terminal, and
-		// slog would escape the newlines that make the list readable.
+		// Sengaja di-print, bukan di-log. Kegagalan ini terjadi sebelum
+		// proses punya logger, yang baca cuma manusia di depan terminal,
+		// dan slog bakal nge-escape baris baru yang justru bikin daftarnya
+		// enak dibaca.
 		fmt.Fprintln(os.Stderr, config.Explain(err))
 		os.Exit(1)
 	}
@@ -57,9 +58,9 @@ func main() {
 	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.AccessTokenTTL)
 	rateLimiter := ratelimit.NewLoginAttemptService(platformPool, cfg.Login.MaxAttempts, cfg.Login.AttemptWindow)
 
-	// tenantRepo satisfies both middleware.TenantLookup (FindByID) and
-	// tenantauth.TenantLookup (FindRecordByCode) — one repository, two
-	// different lookup shapes for two different callers.
+	// tenantRepo sekaligus memenuhi middleware.TenantLookup (FindByID) dan
+	// tenantauth.TenantLookup (FindRecordByCode) — satu repository, dua
+	// bentuk pencarian buat dua pemanggil yang beda.
 	tenantRepo := platformtenant.NewRepository(platformPool, pool.DB)
 	tenantResolver := middleware.NewTenantResolver(tenantRepo, time.Minute)
 

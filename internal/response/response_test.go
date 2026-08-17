@@ -109,8 +109,9 @@ func TestError_RouteNotFound_Returns404NotInternalError(t *testing.T) {
 		return Success(c, 200, nil)
 	})
 
-	// Hit a path with no registered route, so fiber itself raises
-	// *fiber.Error{Code: 404} before this handler ever runs.
+	// Sengaja nembak path yang nggak punya route terdaftar, biar fiber
+	// sendiri yang ngelempar *fiber.Error{Code: 404} sebelum handler ini
+	// sempat jalan.
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/does-not-exist", nil))
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
@@ -136,7 +137,7 @@ func TestError_RouteNotFound_Returns404NotInternalError(t *testing.T) {
 }
 
 func TestError_Internal_LogsCauseServerSide(t *testing.T) {
-	// Capture slog output
+	// Tangkap keluaran slog
 	buf := &bytes.Buffer{}
 	handler := slog.NewJSONHandler(buf, nil)
 	logger := slog.New(handler)
@@ -155,7 +156,7 @@ func TestError_Internal_LogsCauseServerSide(t *testing.T) {
 		t.Fatalf("app.Test: %v", err)
 	}
 
-	// Verify response status and that cause is not exposed
+	// Pastikan status responsnya benar dan penyebab error-nya nggak bocor
 	if resp.StatusCode != 500 {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
 	}
@@ -180,7 +181,7 @@ func TestError_Internal_LogsCauseServerSide(t *testing.T) {
 		t.Error("cause leaked to client response")
 	}
 
-	// Verify the cause was logged server-side with the request_id
+	// Pastikan penyebabnya tercatat di log server bareng request_id-nya
 	logOutput := buf.String()
 	if logOutput == "" {
 		t.Error("expected log output, got empty")

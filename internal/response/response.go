@@ -30,16 +30,18 @@ func SuccessList(c *fiber.Ctx, status int, data any, meta Meta) error {
 	})
 }
 
-// Error renders err as the standard error envelope. *apperror.Error values
-// use their declared status/code/details verbatim. Anything else (a bug, a
-// driver error that leaked past a service) becomes a 500 whose body carries
-// only request_id — the real error is logged, never sent to the client.
-// Internal errors have their causes logged server-side regardless of whether
-// they arrive as bare errors or as pre-wrapped *apperror.Error.
+// Error nulis err ke bentuk amplop error standar. Nilai *apperror.Error
+// dipakai apa adanya: status, code, dan details-nya ikut yang tertulis di
+// situ. Selain itu (bug, atau error driver yang lolos dari service) jadi
+// 500 dengan body yang cuma berisi request_id — error aslinya masuk log,
+// nggak pernah dikirim ke klien.
+//
+// Penyebab error internal selalu dicatat di sisi server, baik dia datang
+// sebagai error polos maupun sudah dibungkus jadi *apperror.Error.
 func Error(c *fiber.Ctx, requestID string, err error) error {
 	var appErr *apperror.Error
 	if errors.As(err, &appErr) {
-		// Log the cause for internal errors so they reach server-side logs.
+		// Catat penyebabnya buat error internal, biar tetap sampai ke log server.
 		if appErr.Code == apperror.CodeInternal {
 			slog.Error("internal error", "request_id", requestID, "error", appErr.Unwrap())
 		}
@@ -59,12 +61,12 @@ func Error(c *fiber.Ctx, requestID string, err error) error {
 		})
 	}
 
-	// Fiber raises *fiber.Error for routing failures (no matching route,
-	// method not allowed) before a handler ever runs, so these never pass
-	// through a service and never become *apperror.Error. Render them with
-	// their real status instead of falling through to the 500 branch below
-	// — a plain "not found" shouldn't be logged and reported as an
-	// unexpected server bug.
+	// Fiber ngelempar *fiber.Error buat kegagalan routing (route nggak
+	// ketemu, method nggak diizinkan) bahkan sebelum handler jalan, jadi
+	// error jenis ini nggak pernah lewat service dan nggak pernah jadi
+	// *apperror.Error. Tampilkan pakai status aslinya, jangan dibiarkan
+	// jatuh ke cabang 500 di bawah — "not found" biasa nggak pantas dicatat
+	// dan dilaporkan sebagai bug server yang tak terduga.
 	var fiberErr *fiber.Error
 	if errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusNotFound {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{

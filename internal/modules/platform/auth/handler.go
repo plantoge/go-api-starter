@@ -23,11 +23,11 @@ func badBody(c *fiber.Ctx) error {
 }
 
 // Login godoc
-// @Summary      Admin login
+// @Summary      Login admin platform
 // @Tags         platform-auth
 // @Accept       json
 // @Produce      json
-// @Param        body body LoginRequest true "credentials"
+// @Param        body body LoginRequest true "email dan password admin"
 // @Success      200 {object} LoginResponse
 // @Failure      401 {object} map[string]any
 // @Router       /admin/auth/login [post]
@@ -48,11 +48,11 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 }
 
 // Refresh godoc
-// @Summary      Refresh an admin access token
+// @Summary      Perbarui access token admin
 // @Tags         platform-auth
 // @Accept       json
 // @Produce      json
-// @Param        body body RefreshRequest true "refresh token"
+// @Param        body body RefreshRequest true "refresh token yang masih berlaku"
 // @Success      200 {object} LoginResponse
 // @Failure      401 {object} map[string]any
 // @Router       /admin/auth/refresh [post]
@@ -73,11 +73,11 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 }
 
 // Logout godoc
-// @Summary      Revoke an admin refresh token
+// @Summary      Cabut refresh token admin
 // @Tags         platform-auth
 // @Accept       json
 // @Produce      json
-// @Param        body body LogoutRequest true "refresh token"
+// @Param        body body LogoutRequest true "refresh token yang mau dicabut"
 // @Success      200 {object} map[string]any
 // @Router       /admin/auth/logout [post]
 func (h *Handler) Logout(c *fiber.Ctx) error {

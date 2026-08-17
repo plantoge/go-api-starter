@@ -27,14 +27,14 @@ func cmdMigratePlatformUp(args []string) error {
 	}
 	db, err := openRawDB(cfg.DB.DSN())
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return fmt.Errorf("gagal terhubung ke database: %w", err)
 	}
 	defer db.Close()
 
 	if err := migration.MigratePlatformUp(db); err != nil {
-		return fmt.Errorf("migrate platform: %w", err)
+		return fmt.Errorf("gagal menjalankan migrasi platform: %w", err)
 	}
-	fmt.Println("platform migrations applied")
+	fmt.Println("migrasi platform selesai diterapkan")
 	return nil
 }
 
@@ -48,7 +48,7 @@ func tenantSchemasToMigrate(db *sql.DB, all bool, code string) ([]tenantTarget, 
 	var args []any
 	if !all {
 		if code == "" {
-			return nil, fmt.Errorf("pass --all or --tenant=<code>")
+			return nil, fmt.Errorf("sertakan --all atau --tenant=<kode>")
 		}
 		query += " AND code = $1"
 		args = append(args, code)
@@ -57,7 +57,7 @@ func tenantSchemasToMigrate(db *sql.DB, all bool, code string) ([]tenantTarget, 
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list tenants: %w", err)
+		return nil, fmt.Errorf("gagal mengambil daftar tenant: %w", err)
 	}
 	defer rows.Close()
 
@@ -74,8 +74,8 @@ func tenantSchemasToMigrate(db *sql.DB, all bool, code string) ([]tenantTarget, 
 
 func cmdMigrateTenantUp(args []string) error {
 	fs := flag.NewFlagSet("migrate tenant up", flag.ExitOnError)
-	all := fs.Bool("all", false, "apply to every tenant")
-	tenantCode := fs.String("tenant", "", "apply to a single tenant by code")
+	all := fs.Bool("all", false, "terapkan ke semua tenant")
+	tenantCode := fs.String("tenant", "", "terapkan ke satu tenant saja, berdasarkan kode")
 	fs.Parse(args)
 
 	cfg, err := config.Load()
@@ -84,7 +84,7 @@ func cmdMigrateTenantUp(args []string) error {
 	}
 	db, err := openRawDB(cfg.DB.DSN())
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return fmt.Errorf("gagal terhubung ke database: %w", err)
 	}
 	defer db.Close()
 
@@ -93,15 +93,15 @@ func cmdMigrateTenantUp(args []string) error {
 		return err
 	}
 	if len(targets) == 0 {
-		return fmt.Errorf("no matching tenants found")
+		return fmt.Errorf("tidak ada tenant yang cocok")
 	}
 
 	done := 0
 	for _, tgt := range targets {
-		fmt.Printf("migrating %s ... ", tgt.code)
+		fmt.Printf("memigrasi %s ... ", tgt.code)
 		if err := migration.MigrateTenantUp(cfg.DB.DSN(), tgt.schemaName); err != nil {
-			fmt.Println("FAILED")
-			return fmt.Errorf("tenant %s: %w (stopped after %d of %d tenants)",
+			fmt.Println("GAGAL")
+			return fmt.Errorf("tenant %s: %w (berhenti setelah %d dari %d tenant)",
 				tgt.code, err, done, len(targets))
 		}
 		fmt.Println("ok")
@@ -117,7 +117,7 @@ func cmdMigrateStatus(args []string) error {
 	}
 	db, err := openRawDB(cfg.DB.DSN())
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return fmt.Errorf("gagal terhubung ke database: %w", err)
 	}
 	defer db.Close()
 
@@ -130,15 +130,15 @@ func cmdMigrateStatus(args []string) error {
 	for _, tgt := range targets {
 		version, dirty, err := migration.TenantSchemaVersion(db, tgt.schemaName)
 		if err != nil {
-			fmt.Printf("%-20s ERROR: %v\n", tgt.code, err)
+			fmt.Printf("%-20s GAGAL DIBACA: %v\n", tgt.code, err)
 			continue
 		}
-		status := "up to date"
+		status := "sudah paling baru"
 		switch {
 		case dirty:
-			status = "DIRTY — needs manual repair"
+			status = "RUSAK — perlu diperbaiki manual"
 		case version < latest:
-			status = fmt.Sprintf("BEHIND (at %d, latest %d)", version, latest)
+			status = fmt.Sprintf("TERTINGGAL (versi %d, terbaru %d)", version, latest)
 		}
 		fmt.Printf("%-20s %s\n", tgt.code, status)
 	}

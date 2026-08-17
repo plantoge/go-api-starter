@@ -7,10 +7,10 @@ import (
 	"encoding/hex"
 )
 
-// GenerateRefreshToken returns a fresh random refresh token. plain is sent
-// to the client; hash is stored in the database — never the plain value
-// itself, so a stolen database dump can't be replayed as a valid refresh
-// token.
+// GenerateRefreshToken bikin refresh token acak yang baru. Nilai plain
+// dikirim ke klien, sedangkan yang disimpan di database cuma hash-nya —
+// nggak pernah nilai plain-nya. Jadi kalau dump database sampai bocor,
+// isinya nggak bisa dipakai ulang sebagai refresh token yang sah.
 func GenerateRefreshToken() (plain string, hash string, err error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {

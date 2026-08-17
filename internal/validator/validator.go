@@ -13,8 +13,8 @@ var instance = newInstance()
 
 func newInstance() *pv.Validate {
 	v := pv.New()
-	// Report the JSON field name (e.g. "email") instead of the Go struct
-	// field name (e.g. "Email") so client-side error mapping is exact.
+	// Pakai nama field JSON (misalnya "email"), bukan nama field struct Go
+	// (misalnya "Email"), biar pemetaan error di sisi klien pas.
 	v.RegisterTagNameFunc(func(fld reflect.StructField) string {
 		name := strings.SplitN(fld.Tag.Get("json"), ",", 2)[0]
 		if name == "-" || name == "" {
@@ -25,9 +25,10 @@ func newInstance() *pv.Validate {
 	return v
 }
 
-// Validate runs struct tag validation on s. It returns nil when s is valid,
-// otherwise an *apperror.Error with Details keyed by JSON field name so the
-// frontend can place each message under the right input.
+// Validate jalanin validasi berdasarkan tag struct pada s. Balikannya nil
+// kalau s valid; kalau nggak, *apperror.Error dengan Details yang dikunci
+// pakai nama field JSON, biar frontend bisa naruh tiap pesan di bawah
+// input yang tepat.
 func Validate(s any) *apperror.Error {
 	err := instance.Struct(s)
 	if err == nil {

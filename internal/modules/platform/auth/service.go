@@ -21,7 +21,7 @@ type adminUser struct {
 }
 
 type Service struct {
-	db          *sqlx.DB // platform-pinned pool
+	db          *sqlx.DB // pool yang dikunci ke schema platform
 	tokens      *appauth.TokenManager
 	accessTTL   time.Duration
 	refreshTTL  time.Duration
@@ -32,14 +32,16 @@ func NewService(platformDB *sqlx.DB, tokens *appauth.TokenManager, accessTTL, re
 	return &Service{db: platformDB, tokens: tokens, accessTTL: accessTTL, refreshTTL: refreshTTL, rateLimiter: rateLimiter}
 }
 
-// dummyPasswordHash is a valid bcrypt hash of an unused, unguessable
-// password. Login always runs exactly one VerifyPassword call — against
-// the real user's hash when found, or against this fixed hash when not —
-// so response timing never reveals whether an email exists/is active
-// versus exists-with-a-wrong-password. (Amendment, added during Task 12
-// execution: the original version below skipped VerifyPassword entirely
-// via && short-circuiting whenever the user wasn't found or was inactive,
-// creating a measurable timing side-channel for email enumeration.)
+// dummyPasswordHash itu hash bcrypt yang sah dari sebuah password yang
+// nggak dipakai dan nggak mungkin ditebak. Login selalu manggil
+// VerifyPassword tepat sekali — ke hash user aslinya kalau ketemu, atau ke
+// hash tetap ini kalau nggak — jadi lama waktu respons nggak pernah
+// ngebocorin mana email yang ada/aktif dan mana yang cuma salah password.
+//
+// (Catatan perbaikan saat Task 12 dikerjakan: versi awalnya kelewat
+// manggil VerifyPassword gara-gara short-circuit && tiap kali user-nya
+// nggak ketemu atau nggak aktif. Itu bikin celah timing yang beneran bisa
+// diukur buat nyari tahu email mana yang terdaftar.)
 var dummyPasswordHash = mustHashDummyPassword()
 
 func mustHashDummyPassword() string {
@@ -65,16 +67,17 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (LoginResponse, e
 	if found {
 		hashToCheck = u.PasswordHash
 	}
-	// Always call VerifyPassword — on the real hash if found, on a fixed
-	// dummy hash otherwise — so this line's cost (dominated by bcrypt) is
-	// the same on every path regardless of whether the user exists.
+	// VerifyPassword selalu dipanggil — ke hash asli kalau user-nya ketemu,
+	// ke hash dummy tetap kalau nggak — biar ongkos baris ini (yang
+	// didominasi bcrypt) sama di semua jalur, terlepas dari ada tidaknya
+	// user tersebut.
 	passwordOK := appauth.VerifyPassword(hashToCheck, req.Password)
 	valid := found && passwordOK
 
-	// If recording the attempt itself fails, brute-force protection
-	// degrades silently for this email/scope unless we log it — the login
-	// still resolves correctly either way, only the rate-limit counter
-	// might undercount.
+	// Kalau pencatatan percobaannya sendiri gagal, perlindungan brute-force
+	// buat email/scope ini diam-diam melemah — makanya tetap di-log.
+	// Login-nya sendiri tetap diputuskan dengan benar, cuma penghitung
+	// rate limit-nya yang mungkin kurang dari kenyataan.
 	if err := s.rateLimiter.Record(ctx, appauth.ScopePlatform, nil, req.Email, valid); err != nil {
 		slog.Error("rate limiter record failed", "scope", appauth.ScopePlatform, "error", err)
 	}
@@ -122,8 +125,9 @@ func (s *Service) Refresh(ctx context.Context, req RefreshRequest) (LoginRespons
 		return LoginResponse{}, apperror.Unauthorized("refresh token sudah tidak berlaku")
 	}
 
-	// No rotation (spec: refresh tokens are not rotated on use) — the same
-	// refresh token stays valid, only a new access token is issued.
+	// Nggak ada rotasi (sesuai spec: refresh token nggak dirotasi tiap
+	// dipakai) — refresh token yang sama tetap berlaku, yang diterbitkan
+	// cuma access token baru.
 	access, err := s.tokens.IssueAccessToken(row.UserID, appauth.ScopePlatform, nil)
 	if err != nil {
 		return LoginResponse{}, apperror.Internal(err)

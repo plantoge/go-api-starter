@@ -14,13 +14,13 @@ const localsKeyLogger = "logger"
 
 type loggerCtxKey struct{}
 
-// Logger attaches a per-request *slog.Logger (tagged with request_id) to
-// both fiber locals and the request's context.Context, then logs one
-// structured line per request after it completes. Downstream middleware
-// (the tenant resolver, Task 11) enriches the logger further — e.g. adding
-// tenant_id — via SetLoggerInCtx; by the time this middleware logs its
-// summary line, c.Next() has already returned, so it picks up whatever the
-// final, most-enriched logger is.
+// Logger nempelin *slog.Logger per request (yang sudah ditandai
+// request_id) ke locals fiber sekaligus ke context.Context milik request,
+// lalu nulis satu baris log terstruktur begitu request selesai. Middleware
+// setelahnya (tenant resolver, Task 11) bisa nambahin info ke logger itu —
+// misalnya tenant_id — lewat SetLoggerInCtx. Pas middleware ini nulis
+// baris ringkasannya, c.Next() sudah balik duluan, jadi yang kepakai
+// otomatis logger versi paling lengkap.
 func Logger(base *slog.Logger) fiber.Handler {
 	if base == nil {
 		base = slog.Default()
@@ -41,15 +41,17 @@ func Logger(base *slog.Logger) fiber.Handler {
 	}
 }
 
-// statusFor reports the status this request will actually be answered
-// with. On the success path (err == nil), the handler already set it via
-// c.Status()/c.SendStatus(), so c.Response().StatusCode() is accurate. On
-// the error path, Fiber's global ErrorHandler hasn't run yet at this point
-// in the middleware chain — it runs strictly after every app.Use()
-// middleware returns — so the response object still holds its default
-// status. Resolve the real status from the error itself instead, using the
-// exact same mapping response.Error uses: an *apperror.Error's declared
-// Status, or 500 for anything else.
+// statusFor ngasih tahu status yang beneran bakal dipakai buat menjawab
+// request ini. Di jalur sukses (err == nil), handler sudah nyetel status
+// lewat c.Status()/c.SendStatus(), jadi c.Response().StatusCode() memang
+// akurat.
+//
+// Di jalur error ceritanya beda: pada titik ini ErrorHandler global punya
+// Fiber belum jalan — dia baru jalan setelah semua middleware app.Use()
+// selesai — jadi objek respons masih megang status bawaan. Makanya status
+// aslinya diambil dari error-nya langsung, pakai pemetaan yang sama persis
+// dengan response.Error: Status yang tertulis di *apperror.Error, atau 500
+// buat error jenis lain.
 func statusFor(c *fiber.Ctx, err error) int {
 	if err == nil {
 		return c.Response().StatusCode()
@@ -61,11 +63,11 @@ func statusFor(c *fiber.Ctx, err error) int {
 	return 500
 }
 
-// SetLoggerInCtx stores l in both fiber locals (for handlers holding a
-// *fiber.Ctx) and the request context (for services holding only a
-// context.Context). It builds on c.UserContext(), never
-// context.Background(), so it never discards values other middleware
-// already attached (e.g. tenant info).
+// SetLoggerInCtx nyimpen l di locals fiber (buat handler yang megang
+// *fiber.Ctx) sekaligus di context request (buat service yang cuma megang
+// context.Context). Dasarnya selalu c.UserContext(), nggak pernah
+// context.Background(), biar nilai yang sudah ditempel middleware lain
+// (misalnya info tenant) nggak kebuang.
 func SetLoggerInCtx(c *fiber.Ctx, l *slog.Logger) {
 	c.Locals(localsKeyLogger, l)
 	c.SetUserContext(context.WithValue(c.UserContext(), loggerCtxKey{}, l))
@@ -78,8 +80,8 @@ func LoggerFromCtx(c *fiber.Ctx) *slog.Logger {
 	return slog.Default()
 }
 
-// LoggerFromContext is the context.Context-based counterpart of
-// LoggerFromCtx, for services that only ever see a context.Context.
+// LoggerFromContext versi context.Context dari LoggerFromCtx, buat service
+// yang memang cuma kebagian context.Context.
 func LoggerFromContext(ctx context.Context) *slog.Logger {
 	if l, ok := ctx.Value(loggerCtxKey{}).(*slog.Logger); ok {
 		return l

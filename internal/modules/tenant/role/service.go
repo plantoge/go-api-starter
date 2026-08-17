@@ -18,11 +18,11 @@ func NewService(db *database.DB) *Service {
 	return &Service{db: db}
 }
 
-// HasPermission implements middleware.PermissionChecker. A user holding a
-// role with is_system=true (currently only "owner") is granted every
-// permission via this bypass, rather than rows in role_permissions, so a
-// newly added permission is automatically available to owners without a
-// backfill migration.
+// HasPermission ngimplementasiin middleware.PermissionChecker. User yang
+// megang role dengan is_system=true (sekarang cuma "owner") langsung
+// dianggap punya semua permission lewat jalan pintas ini, bukan lewat
+// baris di role_permissions. Jadi permission yang baru ditambahin otomatis
+// kepegang owner tanpa perlu migrasi backfill.
 func (s *Service) HasPermission(ctx context.Context, userID uuid.UUID, permCode string) (bool, error) {
 	var allowed bool
 	err := s.db.WithTenant(ctx, func(tx *sqlx.Tx) error {

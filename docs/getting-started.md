@@ -25,11 +25,7 @@ berbeda dari perintah di atas.
 
 ## 4. Jalankan migrasi dan buat admin pertama
 
-```powershell
-go run ./cmd/cli migrate platform up
-go run ./cmd/cli admin create --email=you@example.com --name="Your Name"
-```
-Salin password yang tercetak — password itu hanya ditampilkan sekali.
+                 Salin password yang tercetak — password itu hanya ditampilkan sekali.
 
 ## 5. Buat tenant pertama
 

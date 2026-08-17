@@ -7,9 +7,10 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
-// CORS builds Fiber's CORS middleware from the configured allowed origins.
-// No wildcard — this API uses bearer tokens (AllowCredentials: true), and
-// browsers reject a wildcard origin combined with credentials outright.
+// CORS ngerakit middleware CORS bawaan Fiber dari daftar origin yang
+// diizinkan di konfigurasi. Nggak ada wildcard: API ini pakai bearer token
+// (AllowCredentials: true), dan browser jelas-jelas nolak kombinasi origin
+// wildcard dengan credentials.
 func CORS(allowedOrigins []string) fiber.Handler {
 	return cors.New(cors.Config{
 		AllowOrigins:     strings.Join(allowedOrigins, ","),

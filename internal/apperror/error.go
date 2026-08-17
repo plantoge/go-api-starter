@@ -13,9 +13,10 @@ const (
 	CodeRateLimited            Code = "RATE_LIMITED"
 )
 
-// Error is the one error type every service function returns. The HTTP
-// layer (response.Error) knows how to turn it into a status code and JSON
-// body without the handler ever writing c.Status(...) itself.
+// Error itu satu-satunya tipe error yang dikembalikan semua fungsi
+// service. Lapisan HTTP (response.Error) yang tahu cara ngubahnya jadi
+// status code dan body JSON, jadi handler nggak pernah perlu nulis
+// c.Status(...) sendiri.
 type Error struct {
 	Code    Code
 	Message string

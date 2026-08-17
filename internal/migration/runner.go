@@ -20,25 +20,26 @@ import (
 func newMigrate(db *sql.DB, fsys embed.FS, dir, schemaName string) (*migrate.Migrate, error) {
 	src, err := iofs.New(fsys, dir)
 	if err != nil {
-		return nil, fmt.Errorf("migration source %s: %w", dir, err)
+		return nil, fmt.Errorf("gagal membaca sumber migrasi %s: %w", dir, err)
 	}
 	driver, err := postgres.WithInstance(db, &postgres.Config{
 		SchemaName:      schemaName,
 		MigrationsTable: "schema_migrations",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("migration driver for schema %s: %w", schemaName, err)
+		return nil, fmt.Errorf("gagal menyiapkan driver migrasi untuk schema %s: %w", schemaName, err)
 	}
 	return migrate.NewWithInstance("iofs", src, schemaName, driver)
 }
 
-// MigratePlatformUp applies every unapplied migration under platform/ to
-// the platform schema, creating that schema first if it doesn't exist yet
-// (golang-migrate's postgres driver requires the schema to already exist
-// before it opens, so schema creation can't be a migration file itself).
+// MigratePlatformUp nerapin semua migrasi di folder platform/ yang belum
+// dijalankan ke schema platform, sambil bikin schema-nya dulu kalau memang
+// belum ada. (Driver postgres punya golang-migrate nuntut schema-nya sudah
+// ada sebelum dia dibuka, jadi pembuatan schema nggak bisa ditaruh sebagai
+// file migrasi.)
 func MigratePlatformUp(db *sql.DB) error {
 	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS platform"); err != nil {
-		return fmt.Errorf("create platform schema: %w", err)
+		return fmt.Errorf("gagal membuat schema platform: %w", err)
 	}
 	m, err := newMigrate(db, PlatformFS, "platform", "platform")
 	if err != nil {
@@ -50,8 +51,8 @@ func MigratePlatformUp(db *sql.DB) error {
 	return nil
 }
 
-// LatestPlatformVersion returns the highest migration version compiled
-// into this binary under platform/.
+// LatestPlatformVersion ngasih versi migrasi tertinggi di folder platform/
+// yang ikut dikompilasi ke binary ini.
 func LatestPlatformVersion() uint {
 	return latestVersion(PlatformFS, "platform")
 }
@@ -78,11 +79,12 @@ func latestVersion(fsys embed.FS, dir string) uint {
 	return max
 }
 
-// MigrationFile is one applied-in-order .up.sql file, exposed so callers
-// (tenant provisioning, Task 13) that need to apply migrations by hand
-// inside their own transaction — something golang-migrate itself can't
-// join, since it manages its own connection — can read the exact same
-// files the CLI's `migrate` commands use.
+// MigrationFile mewakili satu file .up.sql yang dijalankan berurutan.
+// Dibuka ke luar supaya pemanggil yang harus nerapin migrasi manual di
+// dalam transaksinya sendiri (penyiapan tenant, Task 13) bisa baca file
+// yang persis sama dengan yang dipakai perintah `migrate` di CLI.
+// golang-migrate sendiri nggak bisa ikut nebeng transaksi orang lain,
+// soalnya dia ngurus koneksinya sendiri.
 type MigrationFile struct {
 	Version uint
 	SQL     string
@@ -109,7 +111,7 @@ func readUpFiles(fsys embed.FS, dir string) ([]MigrationFile, error) {
 		}
 		content, err := fsys.ReadFile(dir + "/" + name)
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", name, err)
+			return nil, fmt.Errorf("gagal membaca %s: %w", name, err)
 		}
 		files = append(files, MigrationFile{Version: uint(version), SQL: string(content)})
 	}
@@ -117,34 +119,37 @@ func readUpFiles(fsys embed.FS, dir string) ([]MigrationFile, error) {
 	return files, nil
 }
 
-// MigrateTenantUp applies every unapplied migration under tenant/ to the
-// given tenant schema, which must already exist (provisioning creates it
-// before calling this).
+// MigrateTenantUp nerapin semua migrasi di folder tenant/ yang belum
+// dijalankan ke schema tenant yang dituju. Schema-nya harus sudah ada —
+// proses penyiapan tenant yang bikin duluan sebelum manggil fungsi ini.
 //
-// Amendment: golang-migrate's postgres driver's SchemaName config option
-// only scopes its own schema_migrations tracking table — it never sets
-// search_path on the connection, so it does nothing to scope the migration
-// files' own SQL bodies. Tenant migration files are intentionally written
-// unqualified (no schema prefix), since the tenant's schema name isn't
-// known until provisioning time — that design relies entirely on
-// search_path being correctly pinned before the files execute. Without
-// this fix, every tenant migration silently ran against "public" instead
-// of the intended tenant schema: invisible until this function was
-// actually exercised against a live PostgreSQL database (it never was,
-// until this point — every DB-dependent test had only ever skipped). A
-// second tenant migrated this way collided immediately with "relation
-// already exists", which is how this was caught. Platform migrations are
-// unaffected — their SQL fully qualifies every object with a "platform."
-// prefix, so they never depended on search_path in the first place.
+// Catatan perbaikan: opsi konfigurasi SchemaName di driver postgres punya
+// golang-migrate cuma ngatur letak tabel pencatat schema_migrations
+// miliknya sendiri. Dia sama sekali nggak nyetel search_path di koneksi,
+// jadi isi SQL di file migrasinya sendiri nggak ikut terarahkan.
 //
-// dsn (not an already-open *sql.DB) is required here because the fix opens
-// its own dedicated, single-connection *sql.DB scoped to schemaName via
-// the connection's "options" parameter — a shared pooled *sql.DB can't be
-// safely re-scoped per call.
+// Padahal file migrasi tenant sengaja ditulis tanpa prefix schema, karena
+// nama schema tenant baru ketahuan pas penyiapan. Desain itu sepenuhnya
+// bergantung pada search_path yang sudah dikunci benar sebelum file-nya
+// dijalankan. Sebelum diperbaiki, semua migrasi tenant diam-diam jalan di
+// "public", bukan di schema tenant yang dimaksud. Ini nggak kelihatan
+// sampai fungsinya beneran dicoba ke PostgreSQL sungguhan — dan itu nggak
+// pernah kejadian sampai titik ini, karena semua test yang butuh database
+// selama ini cuma di-skip. Ketahuannya pas tenant kedua dimigrasi dengan
+// cara yang sama dan langsung tabrakan "relation already exists". Migrasi
+// platform nggak kena masalah ini, soalnya SQL-nya nulis prefix
+// "platform." di tiap objek, jadi memang nggak pernah bergantung ke
+// search_path.
+//
+// Yang diminta di sini dsn, bukan *sql.DB yang sudah terbuka, karena
+// perbaikannya buka *sql.DB sendiri dengan satu koneksi khusus yang
+// diarahkan ke schemaName lewat parameter "options" di koneksi. *sql.DB
+// hasil pooling yang dipakai bareng nggak bisa diarahkan ulang per
+// panggilan dengan aman.
 func MigrateTenantUp(dsn string, schemaName string) error {
 	scopedDB, err := openScopedDB(dsn, schemaName)
 	if err != nil {
-		return fmt.Errorf("connect (scoped to %s): %w", schemaName, err)
+		return fmt.Errorf("gagal terhubung ke database (diarahkan ke %s): %w", schemaName, err)
 	}
 	defer scopedDB.Close()
 
@@ -158,15 +163,17 @@ func MigrateTenantUp(dsn string, schemaName string) error {
 	return nil
 }
 
-// openScopedDB opens a dedicated, single-connection *sql.DB whose
-// search_path is pinned to schemaName via the connection's "options"
-// parameter (equivalent to `psql -c "SET search_path TO schemaName"` at
-// connect time, applied to every statement on this connection). Pinned to
-// exactly one physical connection (SetMaxOpenConns(1)) so the search_path
-// setting can never be silently dropped by handing a later statement to a
-// different pooled connection that never had it set. Callers must Close()
-// the returned db when done — it's a throwaway, single-purpose handle, not
-// meant to be shared or long-lived.
+// openScopedDB buka *sql.DB khusus berisi satu koneksi, yang
+// search_path-nya dikunci ke schemaName lewat parameter "options" di
+// koneksi. Efeknya setara `psql -c "SET search_path TO schemaName"` saat
+// connect, dan berlaku ke tiap statement di koneksi itu.
+//
+// Sengaja dikunci ke tepat satu koneksi fisik (SetMaxOpenConns(1)) biar
+// setelan search_path-nya nggak bisa diam-diam hilang gara-gara statement
+// berikutnya dilempar ke koneksi lain di pool yang nggak pernah disetel.
+// Pemanggil wajib manggil Close() setelah selesai — ini handle sekali
+// pakai buat satu keperluan, bukan buat dipakai bareng atau dibiarkan
+// hidup lama.
 func openScopedDB(dsn, schemaName string) (*sql.DB, error) {
 	sep := "?"
 	if strings.Contains(dsn, "?") {
@@ -181,15 +188,16 @@ func openScopedDB(dsn, schemaName string) (*sql.DB, error) {
 	return db, nil
 }
 
-// TenantSchemaVersion reports the migration version currently applied to
-// schemaName, and whether it's dirty (failed mid-migration). version is 0
-// with dirty=false if no migration has ever been applied. schemaName must
-// already have been provisioned (its schema_migrations table exists) —
-// every caller of this function only reaches it for a tenant that
-// Provision (Task 14) already created and migrated.
+// TenantSchemaVersion ngasih tahu versi migrasi yang sekarang terpasang di
+// schemaName, plus apakah statusnya dirty (migrasi gagal di tengah jalan).
+// Kalau belum ada migrasi yang pernah dijalankan, hasilnya version 0 dan
+// dirty=false. schemaName harus sudah disiapkan lebih dulu (tabel
+// schema_migrations-nya ada) — semua pemanggil fungsi ini cuma sampai ke
+// sini buat tenant yang memang sudah dibuat dan dimigrasi sama Provision
+// (Task 14).
 func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty bool, err error) {
 	if !database.ValidSchemaName(schemaName) {
-		return 0, false, fmt.Errorf("invalid schema name %q", schemaName)
+		return 0, false, fmt.Errorf("nama schema tidak valid: %q", schemaName)
 	}
 	query := `SELECT version, dirty FROM "` + schemaName + `".schema_migrations LIMIT 1`
 	var v int64
@@ -205,19 +213,20 @@ func TenantSchemaVersion(db *sql.DB, schemaName string) (version uint, dirty boo
 	}
 }
 
-// LatestTenantVersion returns the highest migration version compiled into
-// this binary under tenant/ — the version every tenant schema is expected
-// to be at. Used by cli migrate status and by the runtime
-// TENANT_MIGRATION_PENDING guard (Task 11).
+// LatestTenantVersion ngasih versi migrasi tertinggi di folder tenant/
+// yang ikut dikompilasi ke binary ini — versi yang seharusnya dipakai tiap
+// schema tenant. Dipakai `cli migrate status` dan penjaga
+// TENANT_MIGRATION_PENDING saat aplikasi jalan (Task 11).
 func LatestTenantVersion() uint {
 	return latestVersion(TenantFS, "tenant")
 }
 
-// TenantMigrationFiles returns tenant/'s up-migration SQL, in version
-// order, for callers that must apply migrations inside their own already-
-// open transaction — golang-migrate manages its own connection and can't
-// join a caller's transaction, so tenant provisioning (Task 13) reads and
-// execs these directly instead of calling MigrateTenantUp.
+// TenantMigrationFiles ngasih SQL up-migration di folder tenant/, urut
+// berdasarkan versi, buat pemanggil yang harus nerapin migrasi di dalam
+// transaksi yang sudah dia buka sendiri. golang-migrate ngurus koneksinya
+// sendiri dan nggak bisa ikut transaksi orang lain, jadi penyiapan tenant
+// (Task 13) baca dan jalanin file-file ini langsung, bukan manggil
+// MigrateTenantUp.
 func TenantMigrationFiles() ([]MigrationFile, error) {
 	return readUpFiles(TenantFS, "tenant")
 }

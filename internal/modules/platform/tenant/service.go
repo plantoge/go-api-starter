@@ -54,37 +54,41 @@ func randomPassword() (string, error) {
 	return plain[:20], nil
 }
 
-// Provision creates a brand new tenant end to end: validates the code,
-// creates its schema, applies every tenant migration, seeds permissions
-// and the owner role, creates the owner user, and marks the tenant active
-// — all inside one *sql.Tx, so a failure at any step leaves nothing behind
-// (PostgreSQL DDL is transactional, so even CREATE SCHEMA rolls back).
+// Provision nyiapin tenant baru dari nol sampai jadi: validasi kodenya,
+// bikin schema, nerapin semua migrasi tenant, nanam permission dan role
+// owner, bikin user owner, lalu nandain tenant-nya aktif. Semuanya di
+// dalam satu *sql.Tx, jadi kalau ada satu langkah yang gagal nggak ada
+// sisa apa pun — DDL di PostgreSQL ikut transaksional, jadi CREATE SCHEMA
+// pun ikut ke-rollback.
 //
-// Tenant migrations are applied by reading the same files golang-migrate
-// itself uses (migration.TenantMigrationFiles) and exec'ing their SQL
-// directly against this transaction, since golang-migrate manages its own
-// connection and can't join a caller's transaction. Afterwards this writes
-// schema_migrations by hand, in the exact format golang-migrate uses, so
-// `cli migrate tenant up`/`status` (Task 7) stay accurate for this tenant.
+// Migrasi tenant diterapkan dengan cara baca file yang sama persis dengan
+// yang dipakai golang-migrate (migration.TenantMigrationFiles), lalu
+// SQL-nya dijalankan langsung di transaksi ini. Soalnya golang-migrate
+// ngurus koneksinya sendiri dan nggak bisa ikut transaksi pemanggil.
+// Setelah itu schema_migrations ditulis manual, dengan format yang persis
+// sama kayak punya golang-migrate, biar `cli migrate tenant up` dan
+// `status` (Task 7) tetap akurat buat tenant ini.
 func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionResult, error) {
 	code, err := normalizeCode(in.Code)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
 	if !database.ValidSchemaName(code) {
-		return ProvisionResult{}, apperror.Internal(fmt.Errorf("normalized code %q is not a valid schema name", code))
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("kode %q setelah dinormalkan bukan nama schema yang valid", code))
 	}
 
-	// A soft-deleted (but not yet purged) tenant still owns its schema on
-	// disk even though its code is free again for a new row
-	// (tenants_code_key is a partial unique index on deleted_at IS NULL).
-	// Without this check, Provision would pass the INSERT below, then fail
-	// deep inside the transaction at CREATE SCHEMA with a confusing
-	// "already exists" error. Checking up front surfaces a clear conflict
-	// instead. An active/provisioning row with this code is deliberately
-	// NOT rejected here — it falls through to the INSERT below, which is
-	// where the real uniqueness constraint lives and gets classified
-	// correctly.
+	// Tenant yang sudah di-soft delete tapi belum di-purge itu schema-nya
+	// masih nangkring di disk, padahal kodenya sudah bebas dipakai baris
+	// baru (tenants_code_key itu unique index parsial dengan syarat
+	// deleted_at IS NULL). Tanpa pengecekan ini, Provision bakal lolos di
+	// INSERT bawah, lalu gagal jauh di dalam transaksi pas CREATE SCHEMA
+	// dengan error "already exists" yang bikin bingung. Dicek di depan biar
+	// yang muncul konflik yang jelas.
+	//
+	// Baris dengan kode yang sama tapi statusnya active/provisioning
+	// sengaja NGGAK ditolak di sini — biar jatuh ke INSERT di bawah, karena
+	// di situlah constraint keunikan yang sesungguhnya berada dan
+	// klasifikasi error-nya jadi benar.
 	if existing, findErr := s.repo.FindByCodeIncludingDeleted(ctx, code); findErr == nil && existing.DeletedAt != nil {
 		return ProvisionResult{}, apperror.Conflict("kode tenant ini pernah dipakai dan belum di-purge — tunggu purge selesai atau gunakan kode lain")
 	}
@@ -100,18 +104,18 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO platform.tenants (id, code, name, schema_name, status, created_by) VALUES ($1, $2, $3, $4, 'provisioning', $5)`,
 		tenantID, code, in.Name, code, actor.UserID); err != nil {
-		// Only a genuine unique-constraint violation on tenants_code_key
-		// (SQLSTATE 23505) is a duplicate code; anything else is a real
-		// Internal error.
+		// Yang boleh dianggap kode duplikat cuma pelanggaran unique
+		// constraint beneran di tenants_code_key (SQLSTATE 23505). Selain
+		// itu ya memang error Internal sungguhan.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ProvisionResult{}, apperror.Conflict("kode tenant sudah dipakai")
 		}
-		return ProvisionResult{}, apperror.Internal(fmt.Errorf("insert tenant row: %w", err))
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("gagal menyimpan baris tenant: %w", err))
 	}
 
 	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA "`+code+`"`); err != nil {
-		return ProvisionResult{}, apperror.Internal(fmt.Errorf("create schema: %w", err))
+		return ProvisionResult{}, apperror.Internal(fmt.Errorf("gagal membuat schema: %w", err))
 	}
 	if _, err := tx.ExecContext(ctx, `SET LOCAL search_path TO "`+code+`"`); err != nil {
 		return ProvisionResult{}, apperror.Internal(err)
@@ -124,7 +128,7 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 	var latestVersion uint
 	for _, f := range files {
 		if _, err := tx.ExecContext(ctx, f.SQL); err != nil {
-			return ProvisionResult{}, apperror.Internal(fmt.Errorf("apply tenant migration %d: %w", f.Version, err))
+			return ProvisionResult{}, apperror.Internal(fmt.Errorf("gagal menerapkan migrasi tenant %d: %w", f.Version, err))
 		}
 		latestVersion = f.Version
 	}
@@ -151,8 +155,9 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) (ProvisionRe
 		`INSERT INTO roles (id, name, is_system) VALUES ($1, 'owner', true)`, ownerRoleID); err != nil {
 		return ProvisionResult{}, apperror.Internal(err)
 	}
-	// owner gets every permission via the is_system bypass at check time
-	// (Task 15), not rows in role_permissions — no seed loop needed here.
+	// owner dapat semua permission lewat jalan pintas is_system pas
+	// pengecekan (Task 15), bukan dari baris di role_permissions — jadi
+	// nggak perlu loop penanaman data di sini.
 
 	ownerID := uuid.New()
 	ownerPassword, err := randomPassword()
@@ -227,10 +232,11 @@ func (s *Service) Delete(ctx context.Context, code string) error {
 
 const purgeMinAge = 30 * 24 * time.Hour
 
-// Purge permanently drops a soft-deleted tenant's schema. It refuses
-// unless the tenant has been soft-deleted for at least purgeMinAge — DROP
-// SCHEMA can't be undone, and this delay is the only safety net against a
-// mistyped tenant code destroying a client's data outright.
+// Purge ngedrop schema milik tenant yang sudah di-soft delete, permanen.
+// Dia bakal nolak kalau tenant-nya belum di-soft delete selama minimal
+// purgeMinAge. DROP SCHEMA nggak bisa dibatalkan, dan jeda inilah
+// satu-satunya jaring pengaman kalau kode tenant sampai salah ketik dan
+// data klien orang kehapus semua.
 func (s *Service) Purge(ctx context.Context, code string) error {
 	t, err := s.repo.FindByCodeIncludingDeleted(ctx, code)
 	if err != nil {
@@ -243,7 +249,7 @@ func (s *Service) Purge(ctx context.Context, code string) error {
 		return apperror.Conflict("tenant baru bisa di-purge 30 hari setelah dihapus")
 	}
 	if !database.ValidSchemaName(t.SchemaName) {
-		return apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
+		return apperror.Internal(fmt.Errorf("nama schema tidak valid: %q", t.SchemaName))
 	}
 
 	tx, err := s.rawDB.BeginTx(ctx, nil)

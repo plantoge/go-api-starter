@@ -11,14 +11,14 @@ import (
 type TenantRecord struct {
 	TenantID      uuid.UUID
 	SchemaName    string
-	Status        string // provisioning | active | suspended
+	Status        string // provisioning | active | suspended (nilainya tetap dalam bahasa Inggris karena disimpan apa adanya di database)
 	SchemaVersion uint
 	SchemaDirty   bool
 }
 
-// TenantLookup is implemented by the platform tenant service (Task 13).
-// Declared here, on the consumer side, so this package never imports
-// modules/platform/tenant.
+// TenantLookup diimplementasikan oleh service tenant platform (Task 13).
+// Dideklarasikan di sini, di sisi pemakai, biar package ini nggak pernah
+// perlu meng-import modules/platform/tenant.
 type TenantLookup interface {
 	FindByID(ctx context.Context, tenantID uuid.UUID) (TenantRecord, error)
 }
@@ -28,12 +28,13 @@ type cacheEntry struct {
 	expires time.Time
 }
 
-// TenantResolver caches tenant lookups for ttl so RequireTenant doesn't hit
-// the database on every request. This is the "asumsi single instance" cache
-// from the design spec: pencabutan/perubahan status only becomes visible
-// on other instances after ttl elapses (or immediately on this instance if
-// Invalidate is called) — acceptable as long as the app runs as one
-// process; a multi-instance deployment would need this moved to Redis.
+// TenantResolver nyimpen hasil pencarian tenant selama ttl, biar
+// RequireTenant nggak nembak database tiap request. Ini cache dengan
+// "asumsi single instance" seperti di spec desain: pencabutan atau
+// perubahan status baru kelihatan di instance lain setelah ttl habis (atau
+// langsung di instance ini kalau Invalidate dipanggil). Aman selama
+// aplikasi jalan sebagai satu proses; kalau nanti dideploy multi-instance,
+// bagian ini mesti dipindah ke Redis.
 type TenantResolver struct {
 	lookup TenantLookup
 	ttl    time.Duration
@@ -64,9 +65,9 @@ func (r *TenantResolver) Resolve(ctx context.Context, tenantID uuid.UUID) (Tenan
 	return rec, nil
 }
 
-// Invalidate drops tenantID from the cache. Call this whenever a tenant's
-// status changes (suspend/activate/delete, Task 13) so the change is
-// visible on this instance's very next request instead of waiting out ttl.
+// Invalidate ngebuang tenantID dari cache. Panggil ini tiap kali status
+// tenant berubah (suspend/activate/delete, Task 13) biar perubahannya
+// kebaca di request berikutnya, nggak perlu nunggu ttl habis.
 func (r *TenantResolver) Invalidate(tenantID uuid.UUID) {
 	r.mu.Lock()
 	delete(r.cache, tenantID)

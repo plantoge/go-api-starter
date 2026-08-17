@@ -21,10 +21,10 @@ func bearerToken(c *fiber.Ctx) (string, bool) {
 	return strings.TrimPrefix(h, prefix), true
 }
 
-// RequirePlatform verifies the request carries a valid access token with
-// scope=platform and sets the actor in the request context. A tenant-scope
-// token is rejected outright, even though both are signed with the same
-// secret — scope is a hard partition, not just a hint.
+// RequirePlatform mastiin request bawa access token yang sah dengan
+// scope=platform, lalu nyimpen pelakunya di context request. Token
+// ber-scope tenant langsung ditolak, walaupun dua-duanya ditandatangani
+// pakai secret yang sama — scope itu sekat keras, bukan sekadar petunjuk.
 func RequirePlatform(tm *auth.TokenManager) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		tokenStr, ok := bearerToken(c)
@@ -50,12 +50,12 @@ func RequirePlatform(tm *auth.TokenManager) fiber.Handler {
 	}
 }
 
-// RequireTenant verifies the request carries a valid access token with
-// scope=tenant, resolves the tenant's schema/status/migration version
-// through resolver, rejects non-active tenants and schemas whose
-// migrations haven't caught up with this binary (TENANT_MIGRATION_PENDING),
-// and sets both actor and tenant info in the request context — everything
-// database.WithTenant needs downstream.
+// RequireTenant mastiin request bawa access token sah dengan scope=tenant,
+// nyari schema/status/versi migrasi tenant lewat resolver, nolak tenant
+// yang nggak aktif dan schema yang migrasinya masih ketinggalan dari
+// binary ini (TENANT_MIGRATION_PENDING), lalu nyimpen info pelaku dan
+// tenant di context request — semua yang nanti dibutuhin
+// database.WithTenant.
 func RequireTenant(tm *auth.TokenManager, resolver *TenantResolver) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		tokenStr, ok := bearerToken(c)

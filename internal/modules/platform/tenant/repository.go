@@ -16,8 +16,8 @@ import (
 )
 
 type Repository struct {
-	db    *sqlx.DB // platform-pinned pool, for normal CRUD
-	rawDB *sql.DB  // unqualified connection, for schema-scoped migration version checks
+	db    *sqlx.DB // pool yang dikunci ke platform, buat CRUD biasa
+	rawDB *sql.DB  // koneksi polos, buat ngecek versi migrasi per schema
 }
 
 func NewRepository(platformDB *sqlx.DB, rawDB *sql.DB) *Repository {
@@ -49,10 +49,11 @@ func (r *Repository) FindByCodeIncludingDeleted(ctx context.Context, code string
 	return t, nil
 }
 
-// FindByID implements middleware.TenantLookup: it reports both the
-// tenant's platform-side status and its schema's migration version in one
-// call, because RequireTenant needs both to decide whether a request may
-// proceed, and both are cached together under the same TTL.
+// FindByID ngimplementasiin middleware.TenantLookup: sekali panggil, dia
+// ngasih status tenant di sisi platform sekaligus versi migrasi
+// schema-nya. Soalnya RequireTenant butuh dua-duanya buat mutusin apakah
+// sebuah request boleh lanjut, dan dua-duanya disimpan bareng di cache
+// dengan TTL yang sama.
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.TenantRecord, error) {
 	var t Tenant
 	err := r.db.GetContext(ctx, &t, `SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL`, id)
@@ -64,7 +65,7 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.Ten
 	}
 
 	if !database.ValidSchemaName(t.SchemaName) {
-		return middleware.TenantRecord{}, apperror.Internal(fmt.Errorf("invalid schema name %q", t.SchemaName))
+		return middleware.TenantRecord{}, apperror.Internal(fmt.Errorf("nama schema tidak valid: %q", t.SchemaName))
 	}
 	version, dirty, err := migration.TenantSchemaVersion(r.rawDB, t.SchemaName)
 	if err != nil {
@@ -77,9 +78,10 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (middleware.Ten
 	}, nil
 }
 
-// FindRecordByCode is FindByCode plus a migration-version check, shaped as
-// middleware.TenantRecord — the tenant/auth module's login flow (Task 16)
-// uses this to resolve a tenant_code to enough info to attempt a login.
+// FindRecordByCode itu FindByCode plus pengecekan versi migrasi, dibentuk
+// jadi middleware.TenantRecord. Alur login di modul tenant/auth (Task 16)
+// pakai ini buat ngubah tenant_code jadi informasi yang cukup untuk
+// mencoba login.
 func (r *Repository) FindRecordByCode(ctx context.Context, code string) (middleware.TenantRecord, error) {
 	t, err := r.FindByCode(ctx, code)
 	if err != nil {
